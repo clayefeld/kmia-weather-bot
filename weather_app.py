@@ -132,9 +132,9 @@ def main():
         if daily:
             st.metric(label="Projected High", value=f"{daily['temperature']}°F")
 
-    # --- VISUAL SCORE BAR ---
-    score_bar = "█" * score + "░" * (10 - score)
-    st.text(f"SCORE: [{score_bar}]")
+# --- VISUAL SCORE BAR ---
+st.write(f"**Confidence Score:** {score}/10")
+st.progress(score / 10)
 
     # --- NARRATIVE ---
     if daily:
