@@ -16,7 +16,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(myweatherbot_clean_v3, myemail@example.com)'}
+    return {'User-Agent': '(myweatherbot_clean_v4, myemail@example.com)'}
 
 def parse_iso_time(iso_str):
     try:
@@ -28,7 +28,7 @@ def get_display_time(dt_utc):
     dt_est = dt_utc.astimezone(timezone(timedelta(hours=-5)))
     return dt_est.strftime("%I:%M %p")
 
-# --- FETCHERS (SAME LOGIC, CLEANER OUTPUT) ---
+# --- FETCHERS ---
 def fetch_live_history():
     data_list = []
     # 1. NWS History
@@ -69,7 +69,6 @@ def fetch_live_history():
         r = requests.get(AWC_METAR_URL, timeout=4)
         for line in r.text.split('\n'):
             if "KMIA" in line:
-                # Parse logic...
                 time_match = re.search(r"\b(\d{2})(\d{4})Z\b", line)
                 t_match = re.search(r" T(\d)(\d{3})", line)
                 if t_match and time_match:
@@ -254,14 +253,19 @@ def render_forecast_dashboard():
         st.warning("Forecast unavailable. Try again later.")
         return
 
-    # Score Logic
+    # --- CORRECTED SCORE LOGIC ---
     score = 10
     rain_hours = 0
+    
     for h in hourly:
         s = h['shortForecast'].lower()
         if "rain" in s or "shower" in s: rain_hours += 1
-        if "thunder" in s: rain_hours += 2
-    score -= (rain_hours * 2)
+        if "thunder" in s: rain_hours += 2 
+    
+    # Apply penalties based on THRESHOLDS (not per hour)
+    if rain_hours > 0: score -= 2        # Penalty for rain appearing
+    if rain_hours > 4: score -= 2        # Extra penalty if it lingers (>4 hours)
+    
     score = max(1, min(10, score))
     
     # --- TOP SECTION ---
@@ -319,7 +323,7 @@ def render_forecast_dashboard():
 
 # --- MAIN APP ---
 def main():
-    # SIDEBAR NAVIGATION (Much easier than tabs)
+    # SIDEBAR NAVIGATION
     st.sidebar.header("Navigation")
     view_mode = st.sidebar.radio("Select View:", ["Live Monitor", "Tomorrow's Forecast"])
     
