@@ -15,7 +15,7 @@ def get_tomorrow_date():
     return datetime.now() + timedelta(days=1)
 
 def get_headers():
-    return {'User-Agent': '(myweatherbot_streamlit, myemail@example.com)'}
+    return {'User-Agent': '(myweatherbot_streamlit_v2, myemail@example.com)'}
 
 def parse_iso_time(iso_str):
     try:
@@ -132,9 +132,9 @@ def main():
         if daily:
             st.metric(label="Projected High", value=f"{daily['temperature']}°F")
 
-# --- VISUAL SCORE BAR ---
-st.write(f"**Confidence Score:** {score}/10")
-st.progress(score / 10)
+    # --- VISUAL SCORE BAR ---
+    st.write(f"**Confidence Score:** {score}/10")
+    st.progress(score / 10)
 
     # --- NARRATIVE ---
     if daily:
