@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="KMIA Command", page_icon="📡", layout="wide")
+st.set_page_config(page_title="KMIA Weather Bot", page_icon="📡", layout="wide")
 
 # URLs
 NWS_API_HISTORY = "https://api.weather.gov/stations/KMIA/observations"
