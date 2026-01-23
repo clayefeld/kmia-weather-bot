@@ -18,16 +18,18 @@ NWS_POINT_URL = "https://api.weather.gov/points/25.7906,-80.3164"
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- GLOBAL STYLES ---
+# Adds a little spacing to the buttons
 HIDE_INDEX_CSS = """
     <style>
     thead tr th:first-child {display:none}
     tbody th {display:none}
+    div.stButton > button {width: 100%;}
     </style>
     """
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v40_sticky_target, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v41_brackets, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -237,7 +239,7 @@ def calculate_smart_trend(master_list):
     return ((N*sum_xy - sum_x*sum_y) / den) * 60
 
 # --- VIEW: LIVE MONITOR ---
-def render_live_dashboard(target_temp, show_target, manual_price):
+def render_live_dashboard(target_temp, bracket_label, manual_price):
     st.title("🔴 Project Helios: Live Feed")
     
     if st.button("🔄 Refresh System", type="primary"):
@@ -317,7 +319,7 @@ def render_live_dashboard(target_temp, show_target, manual_price):
         elif edge < -15: 
             edge_color = "inverse"
             edge_label = "🛑 OVERPRICED"
-        st.metric(f"Market (Manual Input)", f"{manual_price}¢", f"{edge:+.0f}% Edge ({edge_label})", delta_color=edge_color)
+        st.metric(f"Market Price ({bracket_label})", f"{manual_price}¢", f"{edge:+.0f}% Edge ({edge_label})", delta_color=edge_color)
 
     # --- PROJECTION BOARD ---
     next_3_hours = []
@@ -346,6 +348,17 @@ def render_live_dashboard(target_temp, show_target, manual_price):
         proj_str = " | ".join(proj_vals)
 
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
+
+    # TARGET STATUS CHECK
+    status_msg = "❄️ COLD"
+    if target_temp - 0.5 <= latest['Temp'] < target_temp:
+        status_msg = f"⚠️ TRAP ZONE (Within 0.5° of {target_temp})"
+        st.warning(f"**BRACKET STATUS ({bracket_label}):** {status_msg}")
+    elif latest['Temp'] >= target_temp:
+        status_msg = f"✅ TARGET SECURED (Above {target_temp})"
+        st.success(f"**BRACKET STATUS ({bracket_label}):** {status_msg}")
+    else:
+        st.caption(f"**BRACKET STATUS ({bracket_label}):** {status_msg} (Gap: {target_temp - latest['Temp']:.2f}°F)")
 
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
@@ -440,41 +453,53 @@ def main():
     view_mode = st.sidebar.radio("Command Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
     
-    # 1. READ STICKY STATES (URL)
+    # 1. AUTO-REFRESH (STICKY)
     default_auto = False
-    if "auto" in st.query_params and st.query_params["auto"] == "true":
-        default_auto = True
-        
+    if "auto" in st.query_params and st.query_params["auto"] == "true": default_auto = True
     auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=default_auto)
-    
     if auto_refresh:
         st.query_params["auto"] = "true"
         components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 60000);</script>""", height=0)
     else:
         if "auto" in st.query_params: del st.query_params["auto"]
 
-    # 2. STICKY TARGET
-    show_target = st.sidebar.checkbox("🎯 Active Target Line", value=True)
-    default_target = 76.0
+    # 2. BRACKET SELECTOR (STICKY)
+    st.sidebar.subheader("🎯 Select Bracket")
+    
+    # Defaults
+    default_target = 81.0
     if "target" in st.query_params:
         try: default_target = float(st.query_params["target"])
         except: pass
         
-    target_temp = 76.0 
-    if show_target:
-        target_temp = st.sidebar.number_input("Strike Price", value=default_target, step=0.1, format="%.1f")
-        if target_temp != default_target:
-            st.query_params["target"] = str(target_temp)
+    # Helper to set params
+    def set_target(val):
+        st.query_params["target"] = str(val)
+        
+    # Layout Buttons
+    c1, c2 = st.sidebar.columns(2)
+    if c1.button("77° - 78°", use_container_width=True, type="primary" if default_target==77.0 else "secondary"): set_target(77.0); st.rerun()
+    if c2.button("79° - 80°", use_container_width=True, type="primary" if default_target==79.0 else "secondary"): set_target(79.0); st.rerun()
+    
+    c3, c4 = st.sidebar.columns(2)
+    if c3.button("81° - 82°", use_container_width=True, type="primary" if default_target==81.0 else "secondary"): set_target(81.0); st.rerun()
+    if c4.button("83° - 84°", use_container_width=True, type="primary" if default_target==83.0 else "secondary"): set_target(83.0); st.rerun()
+    
+    if st.sidebar.button("85° or above", use_container_width=True, type="primary" if default_target==85.0 else "secondary"): set_target(85.0); st.rerun()
 
-    # 3. STICKY MARKET PRICE
+    # Map target to label
+    bracket_map = {77.0: "77-78", 79.0: "79-80", 81.0: "81-82", 83.0: "83-84", 85.0: "85+"}
+    current_label = bracket_map.get(default_target, str(default_target))
+
+    # 3. MARKET PRICE (STICKY)
     st.sidebar.divider()
-    st.sidebar.markdown("**📉 Market Sentiment**")
+    st.sidebar.markdown(f"**📉 Price for [{current_label}]**")
     default_price = 50
     if "price" in st.query_params:
         try: default_price = int(st.query_params["price"])
         except: pass
         
-    manual_price = st.sidebar.slider("Current Market Price (Yes)", 1, 99, default_price)
+    manual_price = st.sidebar.slider("Cents", 1, 99, default_price, key="price_slider")
     if manual_price != default_price:
         st.query_params["price"] = str(manual_price)
 
@@ -482,7 +507,7 @@ def main():
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
     f_data = fetch_forecast_data()
     
-    if view_mode == "Live Monitor": render_live_dashboard(target_temp, show_target, manual_price)
+    if view_mode == "Live Monitor": render_live_dashboard(default_target, current_label, manual_price)
     elif view_mode == "Today's Forecast": render_forecast_generic(f_data['today_daily'], f_data['today_hourly'], f_data['taf'], now_miami.strftime("%A, %b %d"))
     elif view_mode == "Tomorrow's Forecast": render_forecast_generic(f_data['tomorrow_daily'], f_data['tomorrow_hourly'], f_data['taf'], (now_miami + timedelta(days=1)).strftime("%A, %b %d"))
 
