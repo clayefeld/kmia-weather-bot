@@ -2,24 +2,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 import re
-import json
-import base64
-import time
 import pandas as pd
-import altair as alt
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone 
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
-
-# --- LIBRARY CHECK ---
-try:
-    from cryptography.hazmat.primitives import serialization, hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    CRYPTO_AVAILABLE = False
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Project Helios", page_icon="☀️", layout="wide")
@@ -29,7 +17,6 @@ NWS_API_HISTORY = "https://api.weather.gov/stations/KMIA/observations"
 AWC_METAR_URL = "https://aviationweather.gov/api/data/metar?ids=KMIA&format=raw&hours=12"
 NWS_POINT_URL = "https://api.weather.gov/points/25.7906,-80.3164"
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
-KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 # --- GLOBAL STYLES ---
 HIDE_INDEX_CSS = """
@@ -39,89 +26,9 @@ HIDE_INDEX_CSS = """
     </style>
     """
 
-# --- KALSHI CLIENT (SECURE AUTH) ---
-class KalshiAuth:
-    def __init__(self):
-        try:
-            self.key_id = st.secrets["KALSHI_KEY_ID"]
-            self.private_key_str = st.secrets["KALSHI_PRIVATE_KEY"].replace("\\n", "\n")
-            self.private_key = serialization.load_pem_private_key(
-                self.private_key_str.encode(),
-                password=None
-            )
-            self.ready = True
-        except Exception as e:
-            self.ready = False
-            self.error = str(e)
-
-    def sign_request(self, method, path, timestamp):
-        if not self.ready: return None
-        msg = f"{timestamp}{method}{path}".encode('utf-8')
-        signature = self.private_key.sign(
-            msg,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )
-        return base64.b64encode(signature).decode('utf-8')
-
-def fetch_all_kalshi_markets():
-    """
-    Fetches ALL contracts for today's High Temp event.
-    Returns: DataFrame of [Strike, Price, Ticker]
-    """
-    if not CRYPTO_AVAILABLE: return None, "Crypto Lib Missing"
-    auth = KalshiAuth()
-    if not auth.ready: return None, "No Keys Configured"
-
-    try:
-        # 1. Context
-        now_miami = datetime.now(ZoneInfo("US/Eastern"))
-        date_str = now_miami.strftime("%y%b%d").upper() # e.g. 26JAN23
-        event_ticker = f"KXHIGHMIA-{date_str}"
-        
-        # 2. Request
-        path = f"/events/{event_ticker}"
-        ts = str(int(time.time() * 1000))
-        sig = auth.sign_request("GET", path, ts)
-        
-        headers = {
-            "KALSHI-ACCESS-KEY": auth.key_id,
-            "KALSHI-ACCESS-SIGNATURE": sig,
-            "KALSHI-ACCESS-TIMESTAMP": ts,
-            "Content-Type": "application/json"
-        }
-        
-        r = requests.get(KALSHI_API_URL + path, headers=headers, timeout=3)
-        if r.status_code != 200: return None, f"API Error: {r.status_code}"
-            
-        data = r.json()
-        markets = data.get('markets', [])
-        
-        # 3. Parse ALL Markets
-        clean_data = []
-        for m in markets:
-            strike = m.get('floor_strike')
-            ask = m.get('yes_ask')
-            if strike:
-                price = ask if ask else 0 # 0 means no liquidity/sellers
-                clean_data.append({"Strike": strike, "Price": price, "Ticker": m.get('ticker')})
-        
-        # Sort by Strike
-        df = pd.DataFrame(clean_data)
-        if not df.empty:
-            df = df.sort_values(by="Strike")
-            
-        return df, None
-
-    except Exception as e:
-        return None, str(e)
-
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v37_marketdepth, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v38_hybrid, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -142,47 +49,56 @@ def get_display_time(dt_utc):
         dt_miami = dt_utc.astimezone(timezone(timedelta(hours=-5)))
     return dt_miami.strftime("%I:%M %p")
 
-# --- AI AGENT LOGIC ---
+# --- AI AGENT LOGIC (THE BRAIN) ---
 def get_agent_analysis(trend, hum, wind_dir, solar_min, sky):
     reasons = []
     sentiment = "NEUTRAL"
-    confidence = 50 # Base
+    confidence = 50 # Base probability (Coin flip)
     
-    # 1. Solar
+    # 1. Solar Analysis
     if solar_min <= 0:
-        reasons.append("Night mode (No fuel)")
+        reasons.append("Night mode (No solar fuel)")
         sentiment = "BEARISH"
         confidence = 20
     elif solar_min < 120:
-        reasons.append("Low solar angle")
+        reasons.append("Low solar angle (<2h left)")
         confidence = 40
         
-    # 2. Moisture
+    # 2. Moisture Analysis (Humidity)
     if hum > 85:
-        reasons.append("Atmosphere Saturated")
+        reasons.append("Atmosphere Saturated (Hard to heat)")
         if trend > 1.0: 
-            reasons.append("⚠️ RALLY SUSPECT (Divergence)")
+            reasons.append("⚠️ RALLY SUSPECT (High Humidity Divergence)")
             sentiment = "TRAP"
-            confidence = 10 
+            confidence = 15 # High confidence it will fail
+    elif hum < 50:
+        reasons.append("Dry Air (Easy heating)")
+        confidence += 10
     
-    # 3. Wind
+    # 3. Wind Analysis (Ocean Breeze)
     if 0 <= wind_dir <= 180:
-        reasons.append("Ocean Breeze (Cooling)")
+        reasons.append("Ocean Breeze (Cooling Effect)")
         if sentiment == "NEUTRAL": confidence = 30
+    elif wind_dir > 180:
+        reasons.append("Land Breeze (Warming)")
+        if sentiment == "NEUTRAL": confidence = 60
         
-    # 4. Sky
+    # 4. Sky Condition
     if "OVC" in sky or "BKN" in sky:
         reasons.append("Clouds blocking sun")
         if sentiment != "TRAP": sentiment = "BEARISH"
-        confidence = 30
+        confidence -= 10
     elif "CLR" in sky or "FEW" in sky:
         if solar_min > 120:
-            reasons.append("Clear Skies (Heating)")
+            reasons.append("Clear Skies + Sun (Heating)")
             if sentiment == "NEUTRAL": 
                 sentiment = "BULLISH"
                 confidence = 85
 
-    if not reasons: reasons.append("Nominal.")
+    # Clamp Confidence
+    confidence = max(1, min(99, confidence))
+
+    if not reasons: reasons.append("Conditions nominal.")
     summary = " + ".join(reasons)
     return sentiment, summary, confidence
 
@@ -198,6 +114,7 @@ def fetch_live_history():
                 temp_c = props.get('temperature', {}).get('value')
                 if temp_c is None: continue
                 
+                # Fetch Humidity & Dewpoint for AI
                 dew_c = props.get('dewpoint', {}).get('value')
                 dew_f = (dew_c * 1.8) + 32 if dew_c is not None else 0.0
                 rel_hum = props.get('relativeHumidity', {}).get('value')
@@ -329,7 +246,7 @@ def calculate_smart_trend(master_list):
     return ((N*sum_xy - sum_x*sum_y) / den) * 60
 
 # --- VIEW: LIVE MONITOR ---
-def render_live_dashboard(target_temp, show_target):
+def render_live_dashboard(target_temp, show_target, manual_price):
     st.title("🔴 Project Helios: Live Feed")
     
     if st.button("🔄 Refresh System", type="primary"):
@@ -339,7 +256,7 @@ def render_live_dashboard(target_temp, show_target):
     history, err = fetch_live_history()
     f_data = fetch_forecast_data()
     
-    # ⚠️ HOISTED: Guarantee existence
+    # ⚠️ SAFETY
     clean_rows = []
     
     if not history:
@@ -369,7 +286,7 @@ def render_live_dashboard(target_temp, show_target):
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
 
-    # --- DAMPENER ---
+    # --- DAMPENER (Physics) ---
     safe_trend = smart_trend
     if is_night and safe_trend < -0.5: safe_trend = -0.5
     
@@ -384,24 +301,6 @@ def render_live_dashboard(target_temp, show_target):
                 
     ai_sent, ai_reason, ai_conf = get_agent_analysis(safe_trend, hum, wind_dir, solar_min, latest['Sky'])
 
-    # --- FETCH FULL KALSHI MARKET ---
-    kalshi_price = 0
-    kalshi_status = "Waiting..."
-    
-    market_df, k_err = fetch_all_kalshi_markets()
-    
-    # Find price for target_temp
-    if market_df is not None and not market_df.empty:
-        kalshi_status = "Live"
-        # Filter df for our target strike
-        match = market_df[market_df['Strike'] == target_temp]
-        if not match.empty:
-            kalshi_price = float(match.iloc[0]['Price'])
-        else:
-            kalshi_status = f"No Strike {target_temp}"
-    else:
-        kalshi_status = f"API Error: {k_err}"
-
     # --- METRICS ---
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
@@ -411,22 +310,34 @@ def render_live_dashboard(target_temp, show_target):
         st.metric(high_label, f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
     with c4: st.metric("Solar Fuel", solar_fuel)
 
-    # --- AI ANALYSIS & MARKET ARB ---
+    # --- AI ANALYSIS & ARB CALCULATOR ---
+    # This matches the "AI Agent" layout you liked in the other script
+    st.markdown("---")
     m_col1, m_col2 = st.columns([2, 1])
     
     with m_col1:
+        # The Brain
         sentiment_color = "blue"
         if ai_sent == "BULLISH": sentiment_color = "green"
         if ai_sent == "BEARISH": sentiment_color = "red"
         if ai_sent == "TRAP": sentiment_color = "orange"
-        st.info(f"🤖 **ANALYST SENTIMENT:** :{sentiment_color}[{ai_sent}]\n\n{ai_reason}")
+        
+        st.info(f"🤖 **PHYSICS ENGINE:** :{sentiment_color}[**{ai_sent}**] ({ai_conf}% Conf)\n\n{ai_reason}")
 
     with m_col2:
-        edge = ai_conf - kalshi_price
+        # The Calculator
+        edge = ai_conf - manual_price
+        edge_label = "Fair Value"
         edge_color = "off"
-        if edge > 15: edge_color = "normal" 
-        if edge < -15: edge_color = "inverse"
-        st.metric(f"Market Yes ({target_temp})", f"{kalshi_price}¢", f"{edge:+.0f}% Edge", delta_color=edge_color)
+        
+        if edge > 15: 
+            edge_color = "normal" # Green
+            edge_label = "🔥 BUY Signal"
+        elif edge < -15: 
+            edge_color = "inverse" # Red
+            edge_label = "🛑 OVERPRICED"
+            
+        st.metric(f"Market (Manual Input)", f"{manual_price}¢", f"{edge:+.0f}% Edge ({edge_label})", delta_color=edge_color)
 
     # --- PROJECTION BOARD ---
     next_3_hours = []
@@ -455,20 +366,6 @@ def render_live_dashboard(target_temp, show_target):
         proj_str = " | ".join(proj_vals)
 
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
-
-    # --- MARKET DEPTH (NEW!) ---
-    if market_df is not None and not market_df.empty:
-        st.markdown("### 📊 Market Depth (Strike vs Price)")
-        st.dataframe(
-            market_df, 
-            hide_index=True, 
-            use_container_width=True,
-            column_config={
-                "Strike": st.column_config.NumberColumn("Strike Temp", format="%.1f°F"),
-                "Price": st.column_config.ProgressColumn("Yes Price (¢)", min_value=0, max_value=99, format="%d¢"),
-                "Ticker": st.column_config.TextColumn("Contract", width="small")
-            }
-        )
 
     # --- SENSOR TABLE ---
     st.subheader("Sensor Log (Miami Time)")
@@ -572,11 +469,16 @@ def main():
     if show_target:
         target_temp = st.sidebar.number_input("Strike Price", value=76.0, step=0.1, format="%.1f")
 
+    # KALSHI MARKET INPUT
+    st.sidebar.divider()
+    st.sidebar.markdown("**📉 Market Sentiment**")
+    manual_price = st.sidebar.slider("Current Market Price (Yes)", 1, 99, 50)
+
     now_miami = get_miami_time()
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
     f_data = fetch_forecast_data()
     
-    if view_mode == "Live Monitor": render_live_dashboard(target_temp, show_target)
+    if view_mode == "Live Monitor": render_live_dashboard(target_temp, show_target, manual_price)
     elif view_mode == "Today's Forecast": render_forecast_generic(f_data['today_daily'], f_data['today_hourly'], f_data['taf'], now_miami.strftime("%A, %b %d"))
     elif view_mode == "Tomorrow's Forecast": render_forecast_generic(f_data['tomorrow_daily'], f_data['tomorrow_hourly'], f_data['taf'], (now_miami + timedelta(days=1)).strftime("%A, %b %d"))
 
