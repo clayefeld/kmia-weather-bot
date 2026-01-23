@@ -5,6 +5,8 @@ import re
 import json
 import base64
 import time
+import pandas as pd
+import altair as alt
 from datetime import datetime, timedelta, timezone
 try:
     from zoneinfo import ZoneInfo
@@ -127,7 +129,7 @@ def fetch_kalshi_market(target_strike):
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v35_secure, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v36_bulletproof, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -345,6 +347,9 @@ def render_live_dashboard(target_temp, show_target, manual_price):
     history, err = fetch_live_history()
     f_data = fetch_forecast_data()
     
+    # ⚠️ HOISTED VARIABLE: Guarantees clean_rows exists no matter what
+    clean_rows = [] 
+    
     if not history:
         st.error("Connection Failed: No Data Available")
         return
@@ -400,8 +405,6 @@ def render_live_dashboard(target_temp, show_target, manual_price):
         # Fallback to manual
         kalshi_price = manual_price
         kalshi_status = f"Manual"
-        # Optional: display error if we expected API to work
-        # if k_err != "No Keys": st.toast(f"API Error: {k_err}")
 
     # --- METRICS ---
     c1, c2, c3, c4 = st.columns(4)
@@ -470,7 +473,7 @@ def render_live_dashboard(target_temp, show_target, manual_price):
 
     # --- SENSOR TABLE ---
     st.subheader("Sensor Log (Miami Time)")
-    clean_rows = []
+    # (Clean_rows is already initialized at the top, we just fill it now)
     for i, row in enumerate(history[:15]):
         vel_str = "—"
         if i < len(history) - 1:
