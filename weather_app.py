@@ -20,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v13_static, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v14_clean, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -283,11 +283,17 @@ def render_live_dashboard():
         })
         
     df = pd.DataFrame(clean_rows)
-    
-    # FORMAT FOR STATIC TABLE
     df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
     df = df.rename(columns={"Temp": "Temp (°F)"})
     
+    # CSS HACK to hide the index column (Left Column)
+    hide_table_row_index = """
+        <style>
+        thead tr th:first-child {display:none}
+        tbody th {display:none}
+        </style>
+        """
+    st.markdown(hide_table_row_index, unsafe_allow_html=True)
     st.table(df)
 
 # --- VIEW: FORECAST RENDERER ---
@@ -345,11 +351,17 @@ def render_forecast_generic(daily, hourly, taf, date_label):
         })
 
     df_h = pd.DataFrame(h_data)
-    
-    # FORMAT FOR STATIC TABLE
     df_h['Temp'] = df_h['Temp'].apply(lambda x: f"{x:.0f}")
     df_h = df_h.rename(columns={"Temp": "Temp (°F)"})
     
+    # CSS HACK to hide the index column (Left Column)
+    hide_table_row_index = """
+        <style>
+        thead tr th:first-child {display:none}
+        tbody th {display:none}
+        </style>
+        """
+    st.markdown(hide_table_row_index, unsafe_allow_html=True)
     st.table(df_h)
 
     if taf:
@@ -370,7 +382,6 @@ def main():
     
     st.sidebar.divider()
     
-    # --- AUTO-REFRESH LOGIC ---
     auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=False)
     if auto_refresh:
         components.html(
