@@ -16,7 +16,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(myweatherbot_v6_tz_fix, myemail@example.com)'}
+    return {'User-Agent': '(myweatherbot_v7_today_tab, myemail@example.com)'}
 
 def get_est_now():
     """Returns the current time explicitly in EST (UTC-5)"""
@@ -108,7 +108,13 @@ def fetch_live_history():
 
 @st.cache_data(ttl=300)
 def fetch_forecast_data():
-    daily_data, hourly_data, taf_data = None, [], None
+    # Containers for both days
+    data = {
+        "today_daily": None, "today_hourly": [],
+        "tomorrow_daily": None, "tomorrow_hourly": [],
+        "taf": None
+    }
+    
     try:
         r = requests.get(NWS_POINT_URL, headers=get_headers(), timeout=5)
         if r.status_code == 200:
@@ -116,29 +122,42 @@ def fetch_forecast_data():
             daily_url = props.get('forecast')
             hourly_url = props.get('forecastHourly')
             
-            # Use EST Time for targeting "Tomorrow"
+            # Setup Dates (EST)
             est_now = get_est_now()
-            target_date_str = (est_now + timedelta(days=1)).strftime("%Y-%m-%d")
+            today_str = est_now.strftime("%Y-%m-%d")
+            tomorrow_str = (est_now + timedelta(days=1)).strftime("%Y-%m-%d")
             
+            # 1. Fetch Daily (Narrative)
             r_d = requests.get(daily_url, headers=get_headers(), timeout=5)
             if r_d.status_code == 200:
                 periods = r_d.json().get('properties', {}).get('periods', [])
                 for p in periods:
-                    if target_date_str in p['startTime'] and p['isDaytime']:
-                        daily_data = p
-                        break
-            
+                    # Find Tomorrow's Day
+                    if tomorrow_str in p['startTime'] and p['isDaytime']:
+                        data["tomorrow_daily"] = p
+                    # Find Today's Day (or current period if late)
+                    if today_str in p['startTime'] and p['isDaytime']:
+                        data["today_daily"] = p
+                    # Fallback for today if "Daytime" is gone (already night)
+                    if not data["today_daily"] and today_str in p['startTime']:
+                         data["today_daily"] = p
+
+            # 2. Fetch Hourly
             r_h = requests.get(hourly_url, headers=get_headers(), timeout=5)
             if r_h.status_code == 200:
                 periods = r_h.json().get('properties', {}).get('periods', [])
                 for p in periods:
-                    if target_date_str in p['startTime']:
-                        hourly_data.append(p)
+                    if tomorrow_str in p['startTime']:
+                        data["tomorrow_hourly"].append(p)
+                    if today_str in p['startTime']:
+                        data["today_hourly"].append(p)
         
+        # 3. TAF
         r_t = requests.get(AWC_TAF_URL, timeout=5)
-        if r_t.status_code == 200: taf_data = r_t.text
+        if r_t.status_code == 200: data["taf"] = r_t.text
+        
     except: pass
-    return daily_data, hourly_data, taf_data
+    return data
 
 # --- MATH ---
 def calculate_smart_trend(master_list):
@@ -176,7 +195,7 @@ def render_live_dashboard():
     
     smart_trend = calculate_smart_trend(history)
 
-    # Solar Calc (EST Fixed)
+    # Solar Calc
     now_est = get_est_now()
     sunset_est = now_est.replace(hour=17, minute=55, second=0, microsecond=0)
     time_left = sunset_est - now_est
@@ -241,97 +260,10 @@ def render_live_dashboard():
         hide_index=True
     )
 
-# --- VIEW: FORECAST ---
-def render_forecast_dashboard():
-    # Use EST Time for Header Date
-    est_now = get_est_now()
-    target_date = (est_now + timedelta(days=1)).strftime("%A, %b %d")
-    st.title(f"📅 Forecast for {target_date}")
+# --- VIEW: SHARED FORECAST RENDERER ---
+def render_forecast_generic(daily, hourly, taf, date_label):
+    st.title(f"📅 Forecast for {date_label}")
     
-    if st.button("🔄 Refresh Forecast"):
+    if st.button(f"🔄 Refresh {date_label}"):
         st.cache_data.clear()
         st.rerun()
-
-    daily, hourly, taf = fetch_forecast_data()
-    
-    if not hourly:
-        st.warning(f"Forecast unavailable for {target_date}. Try again later.")
-        return
-
-    # --- CORRECTED SCORE LOGIC ---
-    score = 10
-    rain_hours = 0
-    for h in hourly:
-        s = h['shortForecast'].lower()
-        if "rain" in s or "shower" in s: rain_hours += 1
-        if "thunder" in s: rain_hours += 2 
-    
-    if rain_hours > 0: score -= 2        
-    if rain_hours > 4: score -= 2        
-    score = max(1, min(10, score))
-    
-    # --- TOP SECTION ---
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.metric("Confidence Score", f"{score}/10")
-        st.progress(score/10)
-    with c2:
-        if daily:
-            st.success(f"**Analyst Note:** {daily['detailedForecast']}")
-            st.caption(f"Winds: {daily['windSpeed']} • High: {daily['temperature']}°F")
-
-    # --- HOURLY TABLE ---
-    st.subheader("Hourly Risk Breakdown")
-    h_data = []
-    for h in hourly:
-        dt = parse_iso_time(h['startTime'])
-        short = h['shortForecast']
-        icon = "☁️"
-        if "Sunny" in short: icon = "☀️"
-        if "Rain" in short: icon = "🌧️"
-        if "Thunder" in short: icon = "⛈️"
-        
-        risk_level = "Safe"
-        if "Rain" in short or "Thunder" in short: risk_level = "⚠️ RISK"
-
-        h_data.append({
-            "Time": dt.strftime("%I %p"),
-            "Temp": h['temperature'],
-            "Condition": f"{icon} {short}",
-            "Wind": f"{h['windDirection']} {h['windSpeed']}",
-            "Status": risk_level
-        })
-
-    df_h = pd.DataFrame(h_data)
-    st.dataframe(
-        df_h,
-        column_config={
-            "Temp": st.column_config.NumberColumn("Temp (°F)", format="%d"),
-            "Status": st.column_config.TextColumn("Trade Risk"),
-        },
-        use_container_width=True,
-        hide_index=True
-    )
-
-    if taf:
-        st.divider()
-        st.caption("✈️ AVIATION TAF (PILOT DATA)")
-        st.code(taf, language="text")
-
-# --- MAIN APP ---
-def main():
-    st.sidebar.header("Navigation")
-    view_mode = st.sidebar.radio("Select View:", ["Live Monitor", "Tomorrow's Forecast"])
-    st.sidebar.divider()
-    
-    # Show last load time in EST
-    est_time = get_est_now().strftime('%I:%M:%S %p')
-    st.sidebar.caption(f"Last Load: {est_time} EST")
-
-    if view_mode == "Live Monitor":
-        render_live_dashboard()
-    else:
-        render_forecast_dashboard()
-
-if __name__ == "__main__":
-    main()
