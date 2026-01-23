@@ -216,4 +216,210 @@ def render_live_dashboard():
     solar_fuel = "NIGHT"
     if not is_night:
         hrs, rem = divmod(time_left.seconds, 3600)
-        mins
+        mins = rem // 60
+        solar_fuel = f"{hrs}h {mins}m"
+
+    # Physics Alert
+    physics_alert = ""
+    if latest.get('DewPoint'):
+        spread = latest['Temp'] - latest['DewPoint']
+        if spread < 3 and not is_night:
+            physics_alert = "⚠️ SATURATION RISK (Humidity High, Temp Capped)"
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
+    with c2: st.metric("Official Round", f"{latest['Official']}°F")
+    with c3: st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
+    with c4: st.metric("Solar Fuel", solar_fuel)
+
+    if physics_alert: st.warning(physics_alert)
+
+    # --- TEXT PROJECTION BOX ---
+    projections = []
+    next_3_hours = []
+    current_utc = datetime.now(timezone.utc)
+    for p in f_data['all_hourly']:
+        p_dt = parse_iso_time(p['startTime'])
+        if p_dt > current_utc:
+            next_3_hours.append(p)
+            if len(next_3_hours) >= 3: break
+    
+    if len(next_3_hours) < 3:
+        proj_str = "⚠️ Forecast Data Unavailable for Projection"
+    else:
+        proj_vals = []
+        curr_temp = latest['Temp']
+        for i, f in enumerate(next_3_hours):
+            nws_temp = f['temperature']
+            trend_weight = 0.6 / (i + 1)
+            model_weight = 1.0 - trend_weight
+            raw_proj = (curr_temp + (smart_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
+            if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
+            if solar_fuel == "NIGHT": raw_proj -= (0.5 * (i+1))
+            icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
+            if "Sunny" in f['shortForecast']: icon = "☀️"
+            proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
+        proj_str = " | ".join(proj_vals)
+
+    trend_icon = "➡️"
+    if smart_trend > 0.5: trend_icon = "🔥 Rising Fast"
+    elif smart_trend > 0.1: trend_icon = "↗️ Rising"
+    elif smart_trend < -0.5: trend_icon = "❄️ Dropping Fast"
+    elif smart_trend < -0.1: trend_icon = "↘️ Falling"
+    else: trend_icon = "➡️ Flat"
+
+    st.success(f"**📈 TREND:** {trend_icon} ({smart_trend:+.2f}°F/hr) \n\n **🔮 PROJECTION:** {proj_str}")
+
+    # --- SENSOR TABLE (NOW ABOVE CHART) ---
+    st.subheader("Sensor Log (Miami Time)")
+    clean_rows = []
+    for i, row in enumerate(history[:12]): 
+        vel_str = "—"
+        if i < len(history) - 1:
+            dt1, dt2 = row['dt_utc'], history[i+1]['dt_utc']
+            diff = (dt1 - dt2).total_seconds()/3600.0
+            if diff > 0:
+                v = (row['Temp'] - history[i+1]['Temp']) / diff
+                if v > 0.5: vel_str = "⬆️ Fast"
+                elif v > 0.1: vel_str = "↗️ Rising"
+                elif v < -0.5: vel_str = "⬇️ Drop"
+                elif v < -0.1: vel_str = "↘️ Falling"
+        
+        sky_code = row['Sky']
+        icon = "☁️" 
+        if "CLR" in sky_code or "SKC" in sky_code: icon = "🌙" if is_night else "☀️"
+        elif "FEW" in sky_code: icon = "🌤️"
+        elif "SCT" in sky_code: icon = "⛅"
+        elif "BKN" in sky_code: icon = "🌥️"
+        elif "OVC" in sky_code: icon = "☁️"
+        
+        clean_rows.append({
+            "Time": get_display_time(row['dt_utc']),
+            "Src": row['Source'],
+            "Condition": f"{icon} {sky_code}",
+            "Temp": row['Temp'],
+            "Official (Rnd)": row['Official'],
+            "Velocity": vel_str,
+            "Wind": row['Wind']
+        })
+        
+    df = pd.DataFrame(clean_rows)
+    df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
+    df = df.rename(columns={"Temp": "Temp (°F)"})
+    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
+    st.table(df)
+
+    # --- ADVANCED CHARTING (NOW AT BOTTOM) ---
+    st.subheader("🔭 Trajectory Analysis")
+    
+    chart_data = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=4)
+    
+    # 1. Actuals
+    for row in history:
+        if row['dt_utc'] > cutoff:
+            try:
+                local_time = row['dt_utc'].astimezone(ZoneInfo("US/Eastern"))
+            except:
+                local_time = row['dt_utc'].astimezone(timezone(timedelta(hours=-5)))
+            chart_data.append({"Time": local_time, "Temp": row['Temp'], "Type": "Actual"})
+            
+    # 2. Projections
+    current_miami = get_miami_time()
+    curr_temp = latest['Temp']
+    for i in range(1, 4):
+        future_time = current_miami + timedelta(hours=i)
+        trend_weight = 0.6 / i
+        model_weight = 1.0 - trend_weight
+        
+        nws_temp = curr_temp 
+        for h in f_data['all_hourly']:
+            h_dt = parse_iso_time(h['startTime'])
+            if h_dt:
+                try: h_dt_miami = h_dt.astimezone(ZoneInfo("US/Eastern"))
+                except: h_dt_miami = h_dt.astimezone(timezone(timedelta(hours=-5)))
+                if abs((h_dt_miami - future_time).total_seconds()) < 3600:
+                    nws_temp = h['temperature']; break
+        
+        proj_val = (curr_temp + (smart_trend * i)) * trend_weight + (nws_temp * model_weight)
+        if is_night: proj_val -= (0.5 * i)
+        chart_data.append({"Time": future_time, "Temp": proj_val, "Type": "Projection"})
+
+    df_chart = pd.DataFrame(chart_data)
+    
+    # Chart
+    base = alt.Chart(df_chart).encode(
+        x=alt.X('Time:T', axis=alt.Axis(format='%I:%M %p')),
+        y=alt.Y('Temp:Q', scale=alt.Scale(zero=False, padding=1)),
+        color=alt.Color('Type', scale=alt.Scale(domain=['Actual', 'Projection'], range=['#3498db', '#f1c40f']))
+    )
+    lines = base.mark_line().encode(strokeDash=alt.condition(alt.datum.Type == 'Projection', alt.value([5, 5]), alt.value([0])))
+    points = base.mark_circle(size=60)
+    rule = alt.Chart(pd.DataFrame({'y': [76]})).mark_rule(color='red', strokeWidth=2).encode(y='y')
+    st.altair_chart((lines + points + rule).interactive(), use_container_width=True)
+    st.caption("🔵 Solid: Actual Data | 🟡 Dashed: AI Projection | 🔴 Red Line: 76°F Target")
+
+
+# --- VIEW: FORECAST RENDERER ---
+def render_forecast_generic(daily, hourly, taf, date_label):
+    st.title(f"☀️ Helios Forecast: {date_label}")
+    if st.button(f"🔄 Refresh {date_label}"): st.cache_data.clear(); st.rerun()
+    if not hourly: st.warning(f"Forecast data unavailable for {date_label}."); return
+
+    score = 10
+    rain_hours = 0
+    for h in hourly:
+        s = h['shortForecast'].lower()
+        if "rain" in s or "shower" in s: rain_hours += 1
+        if "thunder" in s: rain_hours += 2 
+    if rain_hours > 0: score -= 2        
+    if rain_hours > 4: score -= 2        
+    score = max(1, min(10, score))
+    
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.metric("Confidence Score", f"{score}/10")
+        st.progress(score/10)
+    with c2:
+        if daily:
+            st.success(f"**Analyst Note:** {daily['detailedForecast']}")
+            st.caption(f"Winds: {daily['windSpeed']} • Temp: {daily['temperature']}°F")
+
+    st.subheader("Hourly Breakdown (Miami Time)")
+    h_data = []
+    for h in hourly:
+        dt = parse_iso_time(h['startTime'])
+        short = h['shortForecast']
+        icon = "☁️"
+        if "Sunny" in short: icon = "☀️"
+        if "Rain" in short: icon = "🌧️"
+        if "Thunder" in short: icon = "⛈️"
+        if "Clear" in short: icon = "🌙"
+        risk = "Safe"
+        if "Rain" in short or "Thunder" in short: risk = "⚠️ RISK"
+        h_data.append({"Time": dt.strftime("%I %p"), "Temp": h['temperature'], "Condition": f"{icon} {short}", "Wind": f"{h['windDirection']} {h['windSpeed']}", "Trade Risk": risk})
+
+    df_h = pd.DataFrame(h_data)
+    df_h['Temp'] = df_h['Temp'].apply(lambda x: f"{x:.0f}")
+    df_h = df_h.rename(columns={"Temp": "Temp (°F)"})
+    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
+    st.table(df_h)
+    if taf: st.divider(); st.caption("✈️ AVIATION TAF (PILOT DATA)"); st.code(taf, language="text")
+
+# --- MAIN APP ---
+def main():
+    st.sidebar.header("PROJECT HELIOS ☀️")
+    st.sidebar.caption("High-Frequency Weather Algo")
+    view_mode = st.sidebar.radio("Command Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
+    st.sidebar.divider()
+    auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=False)
+    if auto_refresh: components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 60000);</script>""", height=0)
+    now_miami = get_miami_time()
+    st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
+    f_data = fetch_forecast_data()
+    if view_mode == "Live Monitor": render_live_dashboard()
+    elif view_mode == "Today's Forecast": render_forecast_generic(f_data['today_daily'], f_data['today_hourly'], f_data['taf'], now_miami.strftime("%A, %b %d"))
+    elif view_mode == "Tomorrow's Forecast": render_forecast_generic(f_data['tomorrow_daily'], f_data['tomorrow_hourly'], f_data['taf'], (now_miami + timedelta(days=1)).strftime("%A, %b %d"))
+
+if __name__ == "__main__":
+    main()
