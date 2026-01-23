@@ -29,7 +29,7 @@ HIDE_INDEX_CSS = """
 
 # --- UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v20_stable, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v21_gold, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -233,6 +233,42 @@ def render_live_dashboard():
     with c4: st.metric("Solar Fuel", solar_fuel)
 
     if physics_alert: st.warning(physics_alert)
+
+    # --- RESTORED: TREND & TEXT PROJECTION BOX ---
+    projections = []
+    next_3_hours = []
+    current_utc = datetime.now(timezone.utc)
+    for p in f_data['all_hourly']:
+        p_dt = parse_iso_time(p['startTime'])
+        if p_dt > current_utc:
+            next_3_hours.append(p)
+            if len(next_3_hours) >= 3: break
+    
+    if len(next_3_hours) < 3:
+        proj_str = "⚠️ Forecast Data Unavailable for Projection"
+    else:
+        proj_vals = []
+        curr_temp = latest['Temp']
+        for i, f in enumerate(next_3_hours):
+            nws_temp = f['temperature']
+            trend_weight = 0.6 / (i + 1)
+            model_weight = 1.0 - trend_weight
+            raw_proj = (curr_temp + (smart_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
+            if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
+            if solar_fuel == "NIGHT": raw_proj -= (0.5 * (i+1))
+            icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
+            if "Sunny" in f['shortForecast']: icon = "☀️"
+            proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
+        proj_str = " | ".join(proj_vals)
+
+    trend_icon = "➡️"
+    if smart_trend > 0.5: trend_icon = "🔥 Rising Fast"
+    elif smart_trend > 0.1: trend_icon = "↗️ Rising"
+    elif smart_trend < -0.5: trend_icon = "❄️ Dropping Fast"
+    elif smart_trend < -0.1: trend_icon = "↘️ Falling"
+    else: trend_icon = "➡️ Flat"
+
+    st.success(f"**📈 TREND:** {trend_icon} ({smart_trend:+.2f}°F/hr) \n\n **🔮 PROJECTION:** {proj_str}")
 
     # --- ADVANCED CHARTING ---
     st.subheader("🔭 Trajectory Analysis")
