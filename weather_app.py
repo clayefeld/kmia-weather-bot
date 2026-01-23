@@ -10,7 +10,7 @@ except ImportError:
     from backports.zoneinfo import ZoneInfo
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="KMIA Command", page_icon="📡", layout="wide")
+st.set_page_config(page_title="Project Helios", page_icon="☀️", layout="wide")
 
 # URLs
 NWS_API_HISTORY = "https://api.weather.gov/stations/KMIA/observations"
@@ -20,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(myweatherbot_v11_autorefresh, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v1, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -185,9 +185,9 @@ def calculate_smart_trend(master_list):
 
 # --- VIEW: LIVE MONITOR ---
 def render_live_dashboard():
-    st.title("🔴 Live Market Monitor")
+    st.title("🔴 Project Helios: Live Feed")
     
-    if st.button("🔄 Refresh Data", type="primary"):
+    if st.button("🔄 Refresh System", type="primary"):
         st.cache_data.clear()
         st.rerun()
         
@@ -259,7 +259,7 @@ def render_live_dashboard():
 
     st.success(f"**📈 TREND:** {trend_icon} ({smart_trend:+.2f}°F/hr) \n\n **🔮 PROJECTION:** {proj_str}")
 
-    st.subheader("Data Feed (Miami Time)")
+    st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
         vel_str = "—"
@@ -296,7 +296,7 @@ def render_live_dashboard():
 
 # --- VIEW: FORECAST RENDERER ---
 def render_forecast_generic(daily, hourly, taf, date_label):
-    st.title(f"📅 Forecast for {date_label}")
+    st.title(f"☀️ Helios Forecast: {date_label}")
     
     if st.button(f"🔄 Refresh {date_label}"):
         st.cache_data.clear()
@@ -366,9 +366,10 @@ def render_forecast_generic(daily, hourly, taf, date_label):
 
 # --- MAIN APP ---
 def main():
-    st.sidebar.header("Navigation")
+    st.sidebar.header("PROJECT HELIOS ☀️")
+    st.sidebar.caption("High-Frequency Weather Algo")
     
-    view_mode = st.sidebar.radio("Select View:", [
+    view_mode = st.sidebar.radio("Command Deck:", [
         "Live Monitor", 
         "Today's Forecast", 
         "Tomorrow's Forecast"
@@ -376,7 +377,7 @@ def main():
     
     st.sidebar.divider()
     
-    # --- AUTO-REFRESH LOGIC (JS HACK) ---
+    # --- AUTO-REFRESH LOGIC ---
     auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=False)
     if auto_refresh:
         components.html(
@@ -391,7 +392,7 @@ def main():
         )
 
     now_miami = get_miami_time()
-    st.sidebar.caption(f"Last Load: {now_miami.strftime('%I:%M:%S %p')} Miami Time")
+    st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
 
     f_data = fetch_forecast_data()
 
@@ -399,7 +400,7 @@ def main():
         render_live_dashboard()
         
     elif view_mode == "Today's Forecast":
-        today_lbl = now_miami.strftime("%A, %b %d (Today)")
+        today_lbl = now_miami.strftime("%A, %b %d")
         render_forecast_generic(
             f_data['today_daily'], 
             f_data['today_hourly'], 
@@ -408,7 +409,7 @@ def main():
         )
         
     elif view_mode == "Tomorrow's Forecast":
-        tomorrow_lbl = (now_miami + timedelta(days=1)).strftime("%A, %b %d (Tomorrow)")
+        tomorrow_lbl = (now_miami + timedelta(days=1)).strftime("%A, %b %d")
         render_forecast_generic(
             f_data['tomorrow_daily'], 
             f_data['tomorrow_hourly'], 
