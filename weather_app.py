@@ -20,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v16_reorder, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v17_layout_fix, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -226,6 +226,7 @@ def render_live_dashboard():
         st.metric("Solar Fuel", solar_fuel)
 
     # --- PROJECTION BOARD ---
+    projections = []
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -289,14 +290,20 @@ def render_live_dashboard():
             "Src": row['Source'],
             "Condition": f"{icon} {sky_code}",
             "Temp": row['Temp'],
-            "Rnd": row['Official'],
+            "Official": row['Official'],
             "Velocity": vel_str,
             "Wind": row['Wind']
         })
         
     df = pd.DataFrame(clean_rows)
+    # Formatting
     df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
-    df = df.rename(columns={"Temp": "Temp (°F)"})
+    
+    # Rename columns for display
+    df = df.rename(columns={
+        "Temp": "Temp (°F)",
+        "Official": "Official (Rnd)"
+    })
     
     # CSS HACK to hide the index column (Left Column)
     hide_table_row_index = """
