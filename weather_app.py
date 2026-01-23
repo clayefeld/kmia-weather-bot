@@ -2,11 +2,16 @@ import streamlit as st
 import requests
 import re
 import pandas as pd
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+# standard library usually available, but we wrap in try just in case
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    # Fallback for older python environments if needed
+    from backports.zoneinfo import ZoneInfo
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="KMIA Weather Bot", page_icon="📡", layout="wide")
+st.set_page_config(page_title="KMIA Command", page_icon="📡", layout="wide")
 
 # URLs
 NWS_API_HISTORY = "https://api.weather.gov/stations/KMIA/observations"
@@ -16,11 +21,15 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(myweatherbot_v7_today_tab, myemail@example.com)'}
+    return {'User-Agent': '(myweatherbot_v8_zoneinfo, myemail@example.com)'}
 
-def get_est_now():
-    """Returns the current time explicitly in EST (UTC-5)"""
-    return datetime.now(timezone(timedelta(hours=-5)))
+def get_miami_time():
+    """Returns the current time explicitly in US/Eastern (Miami Time)"""
+    try:
+        return datetime.now(ZoneInfo("US/Eastern"))
+    except:
+        # Fallback to fixed offset if ZoneInfo fails on server
+        return datetime.now(timezone(timedelta(hours=-5)))
 
 def parse_iso_time(iso_str):
     try:
@@ -29,8 +38,9 @@ def parse_iso_time(iso_str):
         return None
 
 def get_display_time(dt_utc):
-    dt_est = dt_utc.astimezone(timezone(timedelta(hours=-5)))
-    return dt_est.strftime("%I:%M %p")
+    # Convert any UTC timestamp to Miami Time for display
+    dt_miami = dt_utc.astimezone(ZoneInfo("US/Eastern"))
+    return dt_miami.strftime("%I:%M %p")
 
 # --- FETCHERS ---
 def fetch_live_history():
@@ -45,6 +55,7 @@ def fetch_live_history():
                 if temp_c is None: continue
                 ts = props.get('timestamp')
                 if not ts: continue
+                # Parse as UTC
                 dt_utc = datetime.fromisoformat(ts.split('+')[0]).replace(tzinfo=timezone.utc)
                 f_val = (temp_c * 1.8) + 32
                 
@@ -108,7 +119,6 @@ def fetch_live_history():
 
 @st.cache_data(ttl=300)
 def fetch_forecast_data():
-    # Containers for both days
     data = {
         "today_daily": None, "today_hourly": [],
         "tomorrow_daily": None, "tomorrow_hourly": [],
@@ -122,23 +132,21 @@ def fetch_forecast_data():
             daily_url = props.get('forecast')
             hourly_url = props.get('forecastHourly')
             
-            # Setup Dates (EST)
-            est_now = get_est_now()
-            today_str = est_now.strftime("%Y-%m-%d")
-            tomorrow_str = (est_now + timedelta(days=1)).strftime("%Y-%m-%d")
+            # Setup Dates (Miami Time)
+            now_miami = get_miami_time()
+            today_str = now_miami.strftime("%Y-%m-%d")
+            tomorrow_str = (now_miami + timedelta(days=1)).strftime("%Y-%m-%d")
             
-            # 1. Fetch Daily (Narrative)
+            # 1. Fetch Daily
             r_d = requests.get(daily_url, headers=get_headers(), timeout=5)
             if r_d.status_code == 200:
                 periods = r_d.json().get('properties', {}).get('periods', [])
                 for p in periods:
-                    # Find Tomorrow's Day
                     if tomorrow_str in p['startTime'] and p['isDaytime']:
                         data["tomorrow_daily"] = p
-                    # Find Today's Day (or current period if late)
                     if today_str in p['startTime'] and p['isDaytime']:
                         data["today_daily"] = p
-                    # Fallback for today if "Daytime" is gone (already night)
+                    # Fallback if daytime passed
                     if not data["today_daily"] and today_str in p['startTime']:
                          data["today_daily"] = p
 
@@ -195,10 +203,10 @@ def render_live_dashboard():
     
     smart_trend = calculate_smart_trend(history)
 
-    # Solar Calc
-    now_est = get_est_now()
-    sunset_est = now_est.replace(hour=17, minute=55, second=0, microsecond=0)
-    time_left = sunset_est - now_est
+    # Solar Calc (Miami Time)
+    now_miami = get_miami_time()
+    sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
+    time_left = sunset_miami - now_miami
     solar_fuel = "NIGHT"
     if time_left.total_seconds() > 0:
         hrs, rem = divmod(time_left.seconds, 3600)
@@ -223,7 +231,7 @@ def render_live_dashboard():
     st.info(f"**STATUS: {status_msg}**")
 
     # --- CLEAN TABLE ---
-    st.subheader("Data Feed")
+    st.subheader("Data Feed (Miami Time)")
     
     clean_rows = []
     for i, row in enumerate(history[:15]):
@@ -295,7 +303,7 @@ def render_forecast_generic(daily, hourly, taf, date_label):
             st.caption(f"Winds: {daily['windSpeed']} • Temp: {daily['temperature']}°F")
 
     # --- HOURLY TABLE ---
-    st.subheader("Hourly Breakdown")
+    st.subheader("Hourly Breakdown (Miami Time)")
     h_data = []
     for h in hourly:
         dt = parse_iso_time(h['startTime'])
@@ -335,9 +343,9 @@ def render_forecast_generic(daily, hourly, taf, date_label):
 
 # --- MAIN APP ---
 def main():
+    from datetime import timezone # ensure timezone is imported for fallback
     st.sidebar.header("Navigation")
     
-    # Updated Navigation Options
     view_mode = st.sidebar.radio("Select View:", [
         "Live Monitor", 
         "Today's Forecast", 
@@ -345,17 +353,17 @@ def main():
     ])
     
     st.sidebar.divider()
-    est_now = get_est_now()
-    st.sidebar.caption(f"Last Load: {est_now.strftime('%I:%M:%S %p')} EST")
+    now_miami = get_miami_time()
+    st.sidebar.caption(f"Last Load: {now_miami.strftime('%I:%M:%S %p')} Miami Time")
 
-    # Fetch all data once to share across tabs if needed
+    # Fetch all data once
     f_data = fetch_forecast_data()
 
     if view_mode == "Live Monitor":
         render_live_dashboard()
         
     elif view_mode == "Today's Forecast":
-        today_lbl = est_now.strftime("%A, %b %d (Today)")
+        today_lbl = now_miami.strftime("%A, %b %d (Today)")
         render_forecast_generic(
             f_data['today_daily'], 
             f_data['today_hourly'], 
@@ -364,7 +372,7 @@ def main():
         )
         
     elif view_mode == "Tomorrow's Forecast":
-        tomorrow_lbl = (est_now + timedelta(days=1)).strftime("%A, %b %d (Tomorrow)")
+        tomorrow_lbl = (now_miami + timedelta(days=1)).strftime("%A, %b %d (Tomorrow)")
         render_forecast_generic(
             f_data['tomorrow_daily'], 
             f_data['tomorrow_hourly'], 
