@@ -3,7 +3,7 @@ import streamlit.components.v1 as components
 import requests
 import re
 import pandas as pd
-import altair as alt # NEW: Advanced Charting Library
+import altair as alt
 from datetime import datetime, timedelta, timezone 
 try:
     from zoneinfo import ZoneInfo
@@ -21,9 +21,10 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v18_advanced, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v19_hotfix, myemail@example.com)'}
 
 def get_miami_time():
+    """Returns the current time explicitly in US/Eastern (Miami Time)"""
     try:
         return datetime.now(ZoneInfo("US/Eastern"))
     except:
@@ -54,7 +55,7 @@ def fetch_live_history():
                 temp_c = props.get('temperature', {}).get('value')
                 if temp_c is None: continue
                 
-                # NEW: Fetch Dewpoint for Advanced Physics
+                # Dewpoint
                 dew_c = props.get('dewpoint', {}).get('value')
                 dew_f = (dew_c * 1.8) + 32 if dew_c is not None else None
 
@@ -77,7 +78,7 @@ def fetch_live_history():
                     "dt_utc": dt_utc,
                     "Source": "NWS",
                     "Temp": f_val,
-                    "DewPoint": dew_f, # Store Dewpoint
+                    "DewPoint": dew_f,
                     "Official": int(round(f_val)),
                     "Wind": w_str,
                     "Sky": sky_str,
@@ -118,7 +119,7 @@ def fetch_live_history():
                         "dt_utc": dt_utc,
                         "Source": "AWC",
                         "Temp": f_val,
-                        "DewPoint": None, # METAR raw often tricky to parse dew, skipping for redundancy
+                        "DewPoint": None,
                         "Official": int(round(f_val)),
                         "Wind": w_str,
                         "Sky": sky,
@@ -212,93 +213,88 @@ def render_live_dashboard():
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
 
-    # --- NEW: ADVANCED PHYSICS & GAP ---
-    gap = 76.0 - latest['Temp'] # Example Target 76
-    gap_color = "red" if gap > 2 else ("orange" if gap > 0 else "green")
-    
-    # Physics Check: Dewpoint Ceiling
+    # Physics Alert
     physics_alert = ""
     if latest.get('DewPoint'):
         spread = latest['Temp'] - latest['DewPoint']
         if spread < 3 and not is_night:
             physics_alert = "⚠️ SATURATION RISK (Humidity High, Temp Capped)"
 
-    # --- METRICS GRID ---
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
     with c2: st.metric("Official Round", f"{latest['Official']}°F")
     with c3: st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
     with c4: st.metric("Solar Fuel", solar_fuel)
 
-    if physics_alert:
-        st.warning(physics_alert)
+    if physics_alert: st.warning(physics_alert)
 
     # --- ADVANCED CHARTING: TRAJECTORY INTERCEPT ---
     st.subheader("🔭 Trajectory Analysis")
     
-    # 1. Prepare Historical Data (Last 4 hours)
     chart_data = []
+    # 1. Actual History
     cutoff = datetime.now(timezone.utc) - timedelta(hours=4)
     for row in history:
         if row['dt_utc'] > cutoff:
-            # Convert to Miami time for chart x-axis
-            local_time = row['dt_utc'].astimezone(ZoneInfo("US/Eastern"))
+            # Convert to Miami time for plotting
+            try:
+                local_time = row['dt_utc'].astimezone(ZoneInfo("US/Eastern"))
+            except:
+                local_time = row['dt_utc'].astimezone(timezone(timedelta(hours=-5)))
             chart_data.append({"Time": local_time, "Temp": row['Temp'], "Type": "Actual"})
             
-    # 2. Prepare Projection Data (Next 3 hours)
-    current_time = datetime.now(ZoneInfo("US/Eastern"))
+    # 2. Projection (Next 3 hours)
+    current_miami = get_miami_time()
     curr_temp = latest['Temp']
     
-    # Generate 3 future points based on current trend + forecast
-    # (Simplified physics for chart visualization)
     for i in range(1, 4):
-        future_time = current_time + timedelta(hours=i)
+        future_time = current_miami + timedelta(hours=i)
         
         # Physics Weighting
         trend_weight = 0.6 / i
         model_weight = 1.0 - trend_weight
         
-        # Get forecast for that hour
-        nws_temp = curr_temp # default
-        # Find matching hourly forecast
+        nws_temp = curr_temp 
+        # Find matching hourly forecast (Timezone Safe)
         for h in f_data['all_hourly']:
             h_dt = parse_iso_time(h['startTime'])
-            if h_dt and abs((h_dt - future_time.replace(tzinfo=None)).total_seconds()) < 3600:
-                nws_temp = h['temperature']
-                break
+            if h_dt:
+                # Convert NWS time to Miami time for valid comparison
+                try:
+                    h_dt_miami = h_dt.astimezone(ZoneInfo("US/Eastern"))
+                except:
+                    h_dt_miami = h_dt.astimezone(timezone(timedelta(hours=-5)))
+                
+                # Compare absolute difference in seconds
+                if abs((h_dt_miami - future_time).total_seconds()) < 3600:
+                    nws_temp = h['temperature']
+                    break
         
         proj_val = (curr_temp + (smart_trend * i)) * trend_weight + (nws_temp * model_weight)
-        
-        # Apply Night/Wind Penalties
         if is_night: proj_val -= (0.5 * i)
         
         chart_data.append({"Time": future_time, "Temp": proj_val, "Type": "Projection"})
 
-    # 3. Build Chart
     df_chart = pd.DataFrame(chart_data)
     
-    # Base Chart
+    # Altair Chart
     base = alt.Chart(df_chart).encode(
-        x='Time:T',
-        y=alt.Y('Temp:Q', scale=alt.Scale(domain=[min(df_chart['Temp'])-2, max(df_chart['Temp'])+2])),
+        x=alt.X('Time:T', axis=alt.Axis(format='%I:%M %p')),
+        y=alt.Y('Temp:Q', scale=alt.Scale(zero=False, padding=1)),
         color=alt.Color('Type', scale=alt.Scale(domain=['Actual', 'Projection'], range=['#3498db', '#f1c40f']))
     )
     
-    # Lines & Points
     lines = base.mark_line().encode(strokeDash=alt.condition(alt.datum.Type == 'Projection', alt.value([5, 5]), alt.value([0])))
     points = base.mark_circle(size=60)
-    
-    # Target Line (e.g. 76.0)
-    rule = alt.Chart(pd.DataFrame({'y': [76]})).mark_rule(color='red', strokeWidth=2).encode(y='y')
+    rule = alt.Chart(pd.DataFrame({'y': [76]})).mark_rule(color='red', strokeWidth=2).encode(y='y') # Target Line
     
     st.altair_chart((lines + points + rule).interactive(), use_container_width=True)
     st.caption("🔵 Solid: Actual Data | 🟡 Dashed: AI Projection | 🔴 Red Line: 76°F Target")
 
-
     # --- SENSOR TABLE ---
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
-    for i, row in enumerate(history[:12]): # Limit to 12 rows for clean view
+    for i, row in enumerate(history[:12]): 
         vel_str = "—"
         if i < len(history) - 1:
             dt1, dt2 = row['dt_utc'], history[i+1]['dt_utc']
@@ -310,7 +306,6 @@ def render_live_dashboard():
                 elif v < -0.5: vel_str = "⬇️ Drop"
                 elif v < -0.1: vel_str = "↘️ Falling"
         
-        # Icon Logic
         sky_code = row['Sky']
         icon = "☁️" 
         if "CLR" in sky_code or "SKC" in sky_code: icon = "🌙" if is_night else "☀️"
