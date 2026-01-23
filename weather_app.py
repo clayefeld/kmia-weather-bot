@@ -20,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v14_clean, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v15_icons, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -207,8 +207,10 @@ def render_live_dashboard():
     now_miami = get_miami_time()
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
     time_left = sunset_miami - now_miami
+    
+    is_night = time_left.total_seconds() <= 0
     solar_fuel = "NIGHT"
-    if time_left.total_seconds() > 0:
+    if not is_night:
         hrs, rem = divmod(time_left.seconds, 3600)
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
@@ -224,7 +226,6 @@ def render_live_dashboard():
         st.metric("Solar Fuel", solar_fuel)
 
     # --- PROJECTION BOARD ---
-    projections = []
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -273,13 +274,24 @@ def render_live_dashboard():
                 elif v < -0.5: vel_str = "⬇️ Drop"
                 elif v < -0.1: vel_str = "↘️ Falling"
         
+        # Icon Logic
+        sky_code = row['Sky']
+        icon = "☁️" # Default
+        if "CLR" in sky_code or "SKC" in sky_code:
+            icon = "🌙" if is_night else "☀️"
+        elif "FEW" in sky_code: icon = "🌤️"
+        elif "SCT" in sky_code: icon = "⛅"
+        elif "BKN" in sky_code: icon = "🌥️"
+        elif "OVC" in sky_code: icon = "☁️"
+        
         clean_rows.append({
             "Time": get_display_time(row['dt_utc']),
-            "Source": row['Source'],
+            "Src": row['Source'],
             "Temp": row['Temp'],
+            "Rnd": row['Official'],
             "Velocity": vel_str,
             "Wind": row['Wind'],
-            "Sky": row['Sky']
+            "Condition": f"{icon} {sky_code}"
         })
         
     df = pd.DataFrame(clean_rows)
@@ -354,7 +366,6 @@ def render_forecast_generic(daily, hourly, taf, date_label):
     df_h['Temp'] = df_h['Temp'].apply(lambda x: f"{x:.0f}")
     df_h = df_h.rename(columns={"Temp": "Temp (°F)"})
     
-    # CSS HACK to hide the index column (Left Column)
     hide_table_row_index = """
         <style>
         thead tr th:first-child {display:none}
