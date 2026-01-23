@@ -20,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v30_ai_hybrid, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v31_ai_agent, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -41,6 +41,43 @@ def get_display_time(dt_utc):
         dt_miami = dt_utc.astimezone(timezone(timedelta(hours=-5)))
     return dt_miami.strftime("%I:%M %p")
 
+# --- AI AGENT LOGIC ---
+def get_agent_analysis(trend, hum, wind_dir, solar_min, sky):
+    reasons = []
+    sentiment = "NEUTRAL"
+    
+    # 1. Solar Analysis
+    if solar_min <= 0:
+        reasons.append("Night mode (No fuel)")
+        sentiment = "BEARISH"
+    elif solar_min < 120:
+        reasons.append("Low solar angle")
+        
+    # 2. Moisture Analysis (Humidity)
+    if hum > 85:
+        reasons.append("Atmosphere Saturated (Hard to heat)")
+        if trend > 1.0: 
+            reasons.append("⚠️ RALLY SUSPECT (High Humidity Divergence)")
+            sentiment = "TRAP"
+    
+    # 3. Wind Analysis (Ocean Breeze)
+    if 0 <= wind_dir <= 180:
+        reasons.append("Ocean Breeze (Cooling Effect)")
+        
+    # 4. Sky Condition
+    if "OVC" in sky or "BKN" in sky:
+        reasons.append("Clouds blocking sun")
+        if sentiment != "TRAP": sentiment = "BEARISH"
+    elif "CLR" in sky or "FEW" in sky:
+        if solar_min > 120:
+            reasons.append("Clear Skies + Sun (Heating)")
+            if sentiment == "NEUTRAL": sentiment = "BULLISH"
+
+    if not reasons: reasons.append("Conditions nominal.")
+    
+    summary = " + ".join(reasons)
+    return sentiment, summary
+
 # --- FETCHERS ---
 def fetch_live_history():
     data_list = []
@@ -52,6 +89,13 @@ def fetch_live_history():
                 props = item.get('properties', {})
                 temp_c = props.get('temperature', {}).get('value')
                 if temp_c is None: continue
+                
+                # Fetch Humidity & Dewpoint for AI
+                dew_c = props.get('dewpoint', {}).get('value')
+                dew_f = (dew_c * 1.8) + 32 if dew_c is not None else 0.0
+                rel_hum = props.get('relativeHumidity', {}).get('value')
+                humidity = rel_hum if rel_hum else 0
+
                 ts = props.get('timestamp')
                 if not ts: continue
                 dt_utc = datetime.fromisoformat(ts.split('+')[0]).replace(tzinfo=timezone.utc)
@@ -74,7 +118,9 @@ def fetch_live_history():
                     "Official": int(round(f_val)),
                     "Wind": w_str,
                     "Sky": sky_str,
-                    "WindVal": int(wdir) if wdir else 0
+                    "WindVal": int(wdir) if wdir else -1,
+                    "Hum": humidity,
+                    "Dew": dew_f
                 })
     except Exception as e:
         error_msg = str(e)
@@ -99,7 +145,7 @@ def fetch_live_history():
                     
                     w_m = re.search(r"\b(\d{3}|VRB)(\d{2,3})G?(\d{2,3})?KT\b", line)
                     w_str = "--"
-                    w_val = 0
+                    w_val = -1
                     if w_m: 
                         w_str = f"{w_m.group(1)} @ {w_m.group(2)}kt"
                         if w_m.group(1).isdigit(): w_val = int(w_m.group(1))
@@ -114,7 +160,9 @@ def fetch_live_history():
                         "Official": int(round(f_val)),
                         "Wind": w_str,
                         "Sky": sky,
-                        "WindVal": w_val
+                        "WindVal": w_val,
+                        "Hum": 0, # METAR raw rarely has easy humidity parsing without math
+                        "Dew": 0
                     })
     except Exception as e:
         if not error_msg: error_msg = str(e)
@@ -123,11 +171,7 @@ def fetch_live_history():
 
 @st.cache_data(ttl=300)
 def fetch_forecast_data():
-    data = {
-        "today_daily": None, "today_hourly": [],
-        "tomorrow_daily": None, "tomorrow_hourly": [],
-        "taf": None, "all_hourly": []
-    }
+    data = {"today_daily": None, "today_hourly": [], "tomorrow_daily": None, "tomorrow_hourly": [], "taf": None, "all_hourly": []}
     try:
         r = requests.get(NWS_POINT_URL, headers=get_headers(), timeout=5)
         if r.status_code == 200:
@@ -143,22 +187,17 @@ def fetch_forecast_data():
             if r_d.status_code == 200:
                 periods = r_d.json().get('properties', {}).get('periods', [])
                 for p in periods:
-                    if tomorrow_str in p['startTime'] and p['isDaytime']:
-                        data["tomorrow_daily"] = p
-                    if today_str in p['startTime'] and p['isDaytime']:
-                        data["today_daily"] = p
-                    if not data["today_daily"] and today_str in p['startTime']:
-                         data["today_daily"] = p
+                    if tomorrow_str in p['startTime'] and p['isDaytime']: data["tomorrow_daily"] = p
+                    if today_str in p['startTime'] and p['isDaytime']: data["today_daily"] = p
+                    if not data["today_daily"] and today_str in p['startTime']: data["today_daily"] = p
 
             r_h = requests.get(hourly_url, headers=get_headers(), timeout=5)
             if r_h.status_code == 200:
                 periods = r_h.json().get('properties', {}).get('periods', [])
                 for p in periods:
                     data["all_hourly"].append(p)
-                    if tomorrow_str in p['startTime']:
-                        data["tomorrow_hourly"].append(p)
-                    if today_str in p['startTime']:
-                        data["today_hourly"].append(p)
+                    if tomorrow_str in p['startTime']: data["tomorrow_hourly"].append(p)
+                    if today_str in p['startTime']: data["today_hourly"].append(p)
         
         r_t = requests.get(AWC_TAF_URL, timeout=5)
         if r_t.status_code == 200: data["taf"] = r_t.text
@@ -183,7 +222,7 @@ def calculate_smart_trend(master_list):
     return ((N*sum_xy - sum_x*sum_y) / den) * 60
 
 # --- VIEW: LIVE MONITOR ---
-def render_live_dashboard():
+def render_live_dashboard(target_temp, show_target):
     st.title("🔴 Project Helios: Live Feed")
     
     if st.button("🔄 Refresh System", type="primary"):
@@ -201,49 +240,63 @@ def render_live_dashboard():
     latest = history[0]
     high_mark = max(history, key=lambda x: x['Temp'])
     high_round = int(round(high_mark['Temp']))
-    
-    # --- AI AGENT: PHYSICS ENGINE ---
-    raw_trend = calculate_smart_trend(history)
-    
-    # 1. Volatility Dampener (Clamp to ±1.5)
-    safe_trend = raw_trend
-    if safe_trend > 1.5: safe_trend = 1.5
-    if safe_trend < -1.5: safe_trend = -1.5
+    smart_trend = calculate_smart_trend(history)
 
-    # --- TIME LOGIC ---
+    # --- TIME & SOLAR LOGIC ---
     now_miami = get_miami_time()
     sunrise_miami = now_miami.replace(hour=7, minute=0, second=0, microsecond=0)
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
     
     is_night = False
     solar_fuel = "NIGHT"
+    solar_min = 0
     
     if now_miami < sunrise_miami or now_miami > sunset_miami:
         is_night = True
-        # 2. Night Safety Clamp (Prevent panic drops)
-        if safe_trend < -0.5: safe_trend = -0.5 
     else:
         time_left = sunset_miami - now_miami
+        solar_min = time_left.total_seconds() / 60
         hrs, rem = divmod(time_left.seconds, 3600)
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
 
-    # Smart High Label
-    high_label = "Day High"
-    if now_miami.hour < 8: high_label = "24h High"
+    # --- DAMPENER (Night Safety) ---
+    safe_trend = smart_trend
+    if is_night and safe_trend < -0.5: safe_trend = -0.5
+    
+    # --- AI AGENT EXECUTION ---
+    hum = latest.get('Hum', 0)
+    wind_dir = latest.get('WindVal', -1)
+    # If wind is missing in latest, look back a few rows
+    if wind_dir == -1:
+        for h in history[1:5]:
+            if h.get('WindVal', -1) != -1:
+                wind_dir = h['WindVal']
+                break
+                
+    ai_sent, ai_reason = get_agent_analysis(safe_trend, hum, wind_dir, solar_min, latest['Sky'])
 
     # --- METRICS ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{raw_trend:+.2f}/hr")
+        st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
     with col2:
         st.metric("Official Round", f"{latest['Official']}°F")
     with col3:
+        high_label = "Day High" if now_miami.hour >= 8 else "24h High"
         st.metric(high_label, f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
     with col4:
         st.metric("Solar Fuel", solar_fuel)
 
-    # --- AI PROJECTION BOARD ---
+    # --- AI AGENT DISPLAY ---
+    sentiment_color = "blue"
+    if ai_sent == "BULLISH": sentiment_color = "green"
+    if ai_sent == "BEARISH": sentiment_color = "red"
+    if ai_sent == "TRAP": sentiment_color = "orange"
+    
+    st.info(f"🤖 **ANALYST SENTIMENT:** :{sentiment_color}[{ai_sent}]\n\n{ai_reason}")
+
+    # --- PROJECTION BOARD ---
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -259,17 +312,12 @@ def render_live_dashboard():
         curr_temp = latest['Temp']
         for i, f in enumerate(next_3_hours):
             nws_temp = f['temperature']
-            
-            # 3. Weighted Stability (40% Trend / 60% Forecast)
-            # This makes the projection "trust" the NWS forecast more than the live sensor
-            # which smoothens out short-term sensor noise.
             trend_weight = 0.4 / (i + 1)
             model_weight = 1.0 - trend_weight
             
-            # Using SAFE_TREND (Dampened) instead of raw trend
             raw_proj = (curr_temp + (safe_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
             
-            if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
+            if 0 <= wind_dir <= 180: raw_proj -= (0.5 * (i+1))
             if is_night: raw_proj -= (0.3 * (i+1))
             
             icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
@@ -277,15 +325,21 @@ def render_live_dashboard():
             proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
         proj_str = " | ".join(proj_vals)
 
-    trend_icon = "➡️"
-    if raw_trend > 0.5: trend_icon = "🔥 Rising Fast"
-    elif raw_trend > 0.1: trend_icon = "↗️ Rising"
-    elif raw_trend < -0.5: trend_icon = "❄️ Dropping Fast"
-    elif raw_trend < -0.1: trend_icon = "↘️ Falling"
-    else: trend_icon = "➡️ Flat"
+    st.success(f"**🔮 AI PROJECTION:** {proj_str}")
 
-    st.success(f"**📈 TREND:** {trend_icon} ({raw_trend:+.2f}°F/hr) \n\n **🔮 AI PROJECTION:** {proj_str}")
+    # --- TARGET STATUS ---
+    if show_target:
+        status_msg = "❄️ COLD"
+        if target_temp - 0.5 <= latest['Temp'] < target_temp:
+            status_msg = f"⚠️ TRAP ZONE (Within 0.5° of {target_temp})"
+            st.warning(f"**STATUS:** {status_msg}")
+        elif latest['Temp'] >= target_temp:
+            status_msg = f"✅ TARGET SECURED (Above {target_temp})"
+            st.success(f"**STATUS:** {status_msg}")
+        else:
+            st.caption(f"**STATUS:** {status_msg} (Gap: {target_temp - latest['Temp']:.2f}°F)")
 
+    # --- SENSOR TABLE ---
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
@@ -302,7 +356,7 @@ def render_live_dashboard():
         
         # Icon Logic
         sky_code = row['Sky']
-        icon = "☁️" # Default
+        icon = "☁️" 
         if "CLR" in sky_code or "SKC" in sky_code:
             icon = "🌙" if is_night else "☀️"
         elif "FEW" in sky_code: icon = "🌤️"
@@ -316,21 +370,15 @@ def render_live_dashboard():
             "Condition": f"{icon} {sky_code}",
             "Temp": row['Temp'],
             "Official": row['Official'],
+            "Hum": f"{int(row['Hum'])}%" if row['Hum'] > 0 else "--",
             "Velocity": vel_str,
             "Wind": row['Wind']
         })
         
     df = pd.DataFrame(clean_rows)
-    # Formatting
     df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
+    df = df.rename(columns={"Temp": "Temp (°F)", "Official": "Official (Rnd)"})
     
-    # Rename columns for display
-    df = df.rename(columns={
-        "Temp": "Temp (°F)",
-        "Official": "Official (Rnd)"
-    })
-    
-    # CSS HACK to hide the index column (Left Column)
     hide_table_row_index = """
         <style>
         thead tr th:first-child {display:none}
@@ -343,14 +391,8 @@ def render_live_dashboard():
 # --- VIEW: FORECAST RENDERER ---
 def render_forecast_generic(daily, hourly, taf, date_label):
     st.title(f"☀️ Helios Forecast: {date_label}")
-    
-    if st.button(f"🔄 Refresh {date_label}"):
-        st.cache_data.clear()
-        st.rerun()
-    
-    if not hourly:
-        st.warning(f"Forecast data unavailable for {date_label}.")
-        return
+    if st.button(f"🔄 Refresh {date_label}"): st.cache_data.clear(); st.rerun()
+    if not hourly: st.warning(f"Forecast data unavailable for {date_label}."); return
 
     score = 10
     rain_hours = 0
@@ -358,7 +400,6 @@ def render_forecast_generic(daily, hourly, taf, date_label):
         s = h['shortForecast'].lower()
         if "rain" in s or "shower" in s: rain_hours += 1
         if "thunder" in s: rain_hours += 2 
-    
     if rain_hours > 0: score -= 2        
     if rain_hours > 4: score -= 2        
     score = max(1, min(10, score))
@@ -382,87 +423,40 @@ def render_forecast_generic(daily, hourly, taf, date_label):
         if "Rain" in short: icon = "🌧️"
         if "Thunder" in short: icon = "⛈️"
         if "Clear" in short: icon = "🌙"
-        
-        risk_level = "Safe"
-        if "Rain" in short or "Thunder" in short: risk_level = "⚠️ RISK"
-
-        h_data.append({
-            "Time": dt.strftime("%I %p"),
-            "Temp": h['temperature'],
-            "Condition": f"{icon} {short}",
-            "Wind": f"{h['windDirection']} {h['windSpeed']}",
-            "Trade Risk": risk_level
-        })
+        risk = "Safe"
+        if "Rain" in short or "Thunder" in short: risk = "⚠️ RISK"
+        h_data.append({"Time": dt.strftime("%I %p"), "Temp": h['temperature'], "Condition": f"{icon} {short}", "Wind": f"{h['windDirection']} {h['windSpeed']}", "Trade Risk": risk})
 
     df_h = pd.DataFrame(h_data)
     df_h['Temp'] = df_h['Temp'].apply(lambda x: f"{x:.0f}")
     df_h = df_h.rename(columns={"Temp": "Temp (°F)"})
-    
-    hide_table_row_index = """
-        <style>
-        thead tr th:first-child {display:none}
-        tbody th {display:none}
-        </style>
-        """
-    st.markdown(hide_table_row_index, unsafe_allow_html=True)
+    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     st.table(df_h)
-
-    if taf:
-        st.divider()
-        st.caption("✈️ AVIATION TAF (PILOT DATA)")
-        st.code(taf, language="text")
+    if taf: st.divider(); st.caption("✈️ AVIATION TAF (PILOT DATA)"); st.code(taf, language="text")
 
 # --- MAIN APP ---
 def main():
     st.sidebar.header("PROJECT HELIOS ☀️")
     st.sidebar.caption("High-Frequency Weather Algo")
-    
-    view_mode = st.sidebar.radio("Command Deck:", [
-        "Live Monitor", 
-        "Today's Forecast", 
-        "Tomorrow's Forecast"
-    ])
-    
+    view_mode = st.sidebar.radio("Command Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
     
     auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=False)
-    if auto_refresh:
-        components.html(
-            f"""
-                <script>
-                    setTimeout(function(){{
-                        window.parent.location.reload();
-                    }}, 60000);
-                </script>
-            """,
-            height=0
-        )
+    if auto_refresh: components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 60000);</script>""", height=0)
+
+    # DYNAMIC TARGET INPUT
+    show_target = st.sidebar.checkbox("🎯 Active Target Line", value=True)
+    target_temp = 76.0 
+    if show_target:
+        target_temp = st.sidebar.number_input("Strike Price", value=76.0, step=0.1, format="%.1f")
 
     now_miami = get_miami_time()
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
-
     f_data = fetch_forecast_data()
-
-    if view_mode == "Live Monitor":
-        render_live_dashboard()
-        
-    elif view_mode == "Today's Forecast":
-        today_lbl = now_miami.strftime("%A, %b %d")
-        render_forecast_generic(
-            f_data['today_daily'], 
-            f_data['today_hourly'], 
-            f_data['taf'], 
-            today_lbl
-        )
-        
-    elif view_mode == "Tomorrow's Forecast":
-        tomorrow_lbl = (now_miami + timedelta(days=1)).strftime("%A, %b %d")
-        render_forecast_generic(
-            f_data['tomorrow_daily'], 
-            f_data['tomorrow_hourly'], 
-            f_data['taf'], 
-            tomorrow_lbl
-        )
+    
+    if view_mode == "Live Monitor": render_live_dashboard(target_temp, show_target)
+    elif view_mode == "Today's Forecast": render_forecast_generic(f_data['today_daily'], f_data['today_hourly'], f_data['taf'], now_miami.strftime("%A, %b %d"))
+    elif view_mode == "Tomorrow's Forecast": render_forecast_generic(f_data['tomorrow_daily'], f_data['tomorrow_hourly'], f_data['taf'], (now_miami + timedelta(days=1)).strftime("%A, %b %d"))
 
 if __name__ == "__main__":
     main()
