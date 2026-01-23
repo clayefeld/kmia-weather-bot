@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 import re
 import pandas as pd
@@ -19,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(myweatherbot_v10_projections, myemail@example.com)'}
+    return {'User-Agent': '(myweatherbot_v11_autorefresh, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -126,7 +127,7 @@ def fetch_forecast_data():
     data = {
         "today_daily": None, "today_hourly": [],
         "tomorrow_daily": None, "tomorrow_hourly": [],
-        "taf": None, "all_hourly": [] # Store all hourly for projection logic
+        "taf": None, "all_hourly": []
     }
     try:
         r = requests.get(NWS_POINT_URL, headers=get_headers(), timeout=5)
@@ -139,7 +140,6 @@ def fetch_forecast_data():
             today_str = now_miami.strftime("%Y-%m-%d")
             tomorrow_str = (now_miami + timedelta(days=1)).strftime("%Y-%m-%d")
             
-            # Daily
             r_d = requests.get(daily_url, headers=get_headers(), timeout=5)
             if r_d.status_code == 200:
                 periods = r_d.json().get('properties', {}).get('periods', [])
@@ -151,12 +151,11 @@ def fetch_forecast_data():
                     if not data["today_daily"] and today_str in p['startTime']:
                          data["today_daily"] = p
 
-            # Hourly
             r_h = requests.get(hourly_url, headers=get_headers(), timeout=5)
             if r_h.status_code == 200:
                 periods = r_h.json().get('properties', {}).get('periods', [])
                 for p in periods:
-                    data["all_hourly"].append(p) # Save for calculations
+                    data["all_hourly"].append(p)
                     if tomorrow_str in p['startTime']:
                         data["tomorrow_hourly"].append(p)
                     if today_str in p['startTime']:
@@ -193,7 +192,7 @@ def render_live_dashboard():
         st.rerun()
         
     history, err = fetch_live_history()
-    f_data = fetch_forecast_data() # Need forecast for projections
+    f_data = fetch_forecast_data()
     
     if not history:
         st.error("Connection Failed: No Data Available")
@@ -205,7 +204,6 @@ def render_live_dashboard():
     high_round = int(round(high_mark['Temp']))
     smart_trend = calculate_smart_trend(history)
 
-    # --- SOLAR & TIME CALCS ---
     now_miami = get_miami_time()
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
     time_left = sunset_miami - now_miami
@@ -215,7 +213,6 @@ def render_live_dashboard():
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
 
-    # --- BIG METRICS ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
@@ -226,11 +223,8 @@ def render_live_dashboard():
     with col4:
         st.metric("Solar Fuel", solar_fuel)
 
-    # --- NEW: TREND & PROJECTION BOARD ---
-    # Logic: Blend current trend velocity with NWS hourly forecast
+    # --- PROJECTION BOARD ---
     projections = []
-    
-    # Filter forecast for NEXT 3 hours
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -240,35 +234,22 @@ def render_live_dashboard():
             if len(next_3_hours) >= 3: break
     
     if len(next_3_hours) < 3:
-        # Fallback if forecast missing
         proj_str = "⚠️ Forecast Data Unavailable for Projection"
     else:
-        # Calculate Weighted Projections
         proj_vals = []
         curr_temp = latest['Temp']
-        
         for i, f in enumerate(next_3_hours):
             nws_temp = f['temperature']
-            
-            # Weighting: Hour 1 uses 60% trend, Hour 2 uses 30%, Hour 3 uses 20%
             trend_weight = 0.6 / (i + 1)
             model_weight = 1.0 - trend_weight
-            
-            # Math: (Start + (Trend * Hours)) * Weight + (NWS_Forecast * Weight)
             raw_proj = (curr_temp + (smart_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
-            
-            # Adjustments
-            if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1)) # East Wind Cools
-            if solar_fuel == "NIGHT": raw_proj -= (0.5 * (i+1)) # Night cooling
-            
+            if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
+            if solar_fuel == "NIGHT": raw_proj -= (0.5 * (i+1))
             icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
             if "Sunny" in f['shortForecast']: icon = "☀️"
-            
             proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
-        
         proj_str = " | ".join(proj_vals)
 
-    # Visual Trend Icon
     trend_icon = "➡️"
     if smart_trend > 0.5: trend_icon = "🔥 Rising Fast"
     elif smart_trend > 0.1: trend_icon = "↗️ Rising"
@@ -278,7 +259,6 @@ def render_live_dashboard():
 
     st.success(f"**📈 TREND:** {trend_icon} ({smart_trend:+.2f}°F/hr) \n\n **🔮 PROJECTION:** {proj_str}")
 
-    # --- CLEAN TABLE ---
     st.subheader("Data Feed (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
@@ -395,6 +375,21 @@ def main():
     ])
     
     st.sidebar.divider()
+    
+    # --- AUTO-REFRESH LOGIC (JS HACK) ---
+    auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=False)
+    if auto_refresh:
+        components.html(
+            f"""
+                <script>
+                    setTimeout(function(){{
+                        window.parent.location.reload();
+                    }}, 60000);
+                </script>
+            """,
+            height=0
+        )
+
     now_miami = get_miami_time()
     st.sidebar.caption(f"Last Load: {now_miami.strftime('%I:%M:%S %p')} Miami Time")
 
