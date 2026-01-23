@@ -3,7 +3,6 @@ import streamlit.components.v1 as components
 import requests
 import re
 import pandas as pd
-import altair as alt
 from datetime import datetime, timedelta, timezone 
 try:
     from zoneinfo import ZoneInfo
@@ -29,7 +28,7 @@ HIDE_INDEX_CSS = """
 
 # --- UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v26_fixed, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v27_nightfix, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -189,7 +188,7 @@ def calculate_smart_trend(master_list):
     return ((N*sum_xy - sum_x*sum_y) / den) * 60
 
 # --- VIEW: LIVE MONITOR ---
-def render_live_dashboard(target_temp, show_target):
+def render_live_dashboard():
     st.title("🔴 Project Helios: Advanced Feed")
     
     if st.button("🔄 Refresh System", type="primary"):
@@ -208,19 +207,29 @@ def render_live_dashboard(target_temp, show_target):
     high_round = int(round(high_mark['Temp']))
     smart_trend = calculate_smart_trend(history)
 
-    # --- VOLATILITY DAMPENER (PHYSICS ENGINE) ---
-    # Clamp trend to prevent extreme projections
+    # --- VOLATILITY DAMPENER ---
+    # Limits velocity to realistic max/min to avoid panic projections
     safe_trend = smart_trend
     if safe_trend > 1.5: safe_trend = 1.5
     if safe_trend < -1.5: safe_trend = -1.5
 
+    # --- SOLAR FUEL LOGIC (FIXED) ---
     now_miami = get_miami_time()
+    # Define Sunrise (7 AM) and Sunset (5:55 PM) for rough logic
+    sunrise_miami = now_miami.replace(hour=7, minute=0, second=0, microsecond=0)
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
-    time_left = sunset_miami - now_miami
-    is_night = time_left.total_seconds() <= 0
     
+    # Logic: It is NIGHT if it is before Sunrise OR after Sunset
+    is_night = False
     solar_fuel = "NIGHT"
-    if not is_night:
+    
+    if now_miami < sunrise_miami:
+        is_night = True # Pre-Dawn
+    elif now_miami > sunset_miami:
+        is_night = True # Post-Dusk
+    else:
+        # Daytime Logic
+        time_left = sunset_miami - now_miami
         hrs, rem = divmod(time_left.seconds, 3600)
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
@@ -242,7 +251,6 @@ def render_live_dashboard(target_temp, show_target):
     if physics_alert: st.warning(physics_alert)
 
     # --- TEXT PROJECTION BOX ---
-    projections = []
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -258,15 +266,14 @@ def render_live_dashboard(target_temp, show_target):
         curr_temp = latest['Temp']
         for i, f in enumerate(next_3_hours):
             nws_temp = f['temperature']
-            # DAMPENED WEIGHTING: 40% Trend, 60% Forecast
+            # DAMPENED WEIGHTING: 40% Trend / 60% Forecast
             trend_weight = 0.4 / (i + 1)
             model_weight = 1.0 - trend_weight
             
-            # Use 'safe_trend' instead of raw 'smart_trend'
             raw_proj = (curr_temp + (safe_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
             
             if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
-            if solar_fuel == "NIGHT": raw_proj -= (0.5 * (i+1))
+            if is_night: raw_proj -= (0.5 * (i+1))
             icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
             if "Sunny" in f['shortForecast']: icon = "☀️"
             proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
@@ -279,10 +286,9 @@ def render_live_dashboard(target_temp, show_target):
     elif smart_trend < -0.1: trend_icon = "↘️ Falling"
     else: trend_icon = "➡️ Flat"
 
-    # Display Safe Trend in Text Box
     st.success(f"**📈 TREND:** {trend_icon} ({smart_trend:+.2f}°F/hr) \n\n **🔮 PROJECTION:** {proj_str}")
 
-    # --- SENSOR TABLE ---
+    # --- SENSOR TABLE (v17 Style) ---
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
@@ -297,6 +303,7 @@ def render_live_dashboard(target_temp, show_target):
                 elif v < -0.5: vel_str = "⬇️ Drop"
                 elif v < -0.1: vel_str = "↘️ Falling"
         
+        # Icon Logic
         sky_code = row['Sky']
         icon = "☁️" 
         if "CLR" in sky_code or "SKC" in sky_code:
@@ -321,65 +328,6 @@ def render_live_dashboard(target_temp, show_target):
     df = df.rename(columns={"Temp": "Temp (°F)", "Official": "Official (Rnd)"})
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     st.table(df)
-
-    # --- ADVANCED CHARTING (Using Dampened Physics) ---
-    st.subheader("🔭 Trajectory Analysis")
-    
-    chart_data = []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=4)
-    
-    # 1. Actuals
-    for row in history:
-        if row['dt_utc'] > cutoff:
-            try:
-                local_time = row['dt_utc'].astimezone(ZoneInfo("US/Eastern"))
-            except:
-                local_time = row['dt_utc'].astimezone(timezone(timedelta(hours=-5)))
-            chart_data.append({"Time": local_time, "Temp": row['Temp'], "Type": "Actual"})
-            
-    # 2. Projections (Using Safe Trend)
-    current_miami = get_miami_time()
-    curr_temp = latest['Temp']
-    for i in range(1, 4):
-        future_time = current_miami + timedelta(hours=i)
-        trend_weight = 0.4 / i
-        model_weight = 1.0 - trend_weight
-        
-        nws_temp = curr_temp 
-        for h in f_data['all_hourly']:
-            h_dt = parse_iso_time(h['startTime'])
-            if h_dt:
-                try: h_dt_miami = h_dt.astimezone(ZoneInfo("US/Eastern"))
-                except: h_dt_miami = h_dt.astimezone(timezone(timedelta(hours=-5)))
-                if abs((h_dt_miami - future_time).total_seconds()) < 3600:
-                    nws_temp = h['temperature']; break
-        
-        # Use SAFE_TREND here
-        proj_val = (curr_temp + (safe_trend * i)) * trend_weight + (nws_temp * model_weight)
-        if is_night: proj_val -= (0.5 * i)
-        chart_data.append({"Time": future_time, "Temp": proj_val, "Type": "Projection"})
-
-    df_chart = pd.DataFrame(chart_data)
-    
-    # Chart
-    base = alt.Chart(df_chart).encode(
-        x=alt.X('Time:T', axis=alt.Axis(format='%I:%M %p')),
-        y=alt.Y('Temp:Q', scale=alt.Scale(zero=False, padding=1)),
-        color=alt.Color('Type', scale=alt.Scale(domain=['Actual', 'Projection'], range=['#3498db', '#f1c40f']))
-    )
-    lines = base.mark_line().encode(strokeDash=alt.condition(alt.datum.Type == 'Projection', alt.value([5, 5]), alt.value([0])))
-    points = base.mark_circle(size=60)
-    
-    layers = lines + points
-    if show_target:
-        rule = alt.Chart(pd.DataFrame({'y': [target_temp]})).mark_rule(color='red', strokeWidth=2).encode(y='y')
-        layers = layers + rule
-    
-    st.altair_chart(layers.interactive(), use_container_width=True)
-    caption_txt = "🔵 Solid: Actual Data | 🟡 Dashed: AI Projection (Dampened)"
-    if show_target: caption_txt += f" | 🔴 Red Line: {target_temp}°F Target"
-    st.caption(caption_txt)
-
 
 # --- VIEW: FORECAST RENDERER ---
 def render_forecast_generic(daily, hourly, taf, date_label):
@@ -433,31 +381,12 @@ def main():
     st.sidebar.caption("High-Frequency Weather Algo")
     view_mode = st.sidebar.radio("Command Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
-    
     auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=False)
-    if auto_refresh:
-        components.html(
-            f"""
-                <script>
-                    setTimeout(function(){{
-                        window.parent.location.reload();
-                    }}, 60000);
-                </script>
-            """,
-            height=0
-        )
-
-    # DYNAMIC TARGET INPUT
-    show_target = st.sidebar.checkbox("🎯 Active Target Line", value=True)
-    target_temp = 76.0 
-    if show_target:
-        target_temp = st.sidebar.number_input("Strike Price", value=76.0, step=0.1, format="%.1f")
-
+    if auto_refresh: components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 60000);</script>""", height=0)
     now_miami = get_miami_time()
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
     f_data = fetch_forecast_data()
-    
-    if view_mode == "Live Monitor": render_live_dashboard(target_temp, show_target)
+    if view_mode == "Live Monitor": render_live_dashboard()
     elif view_mode == "Today's Forecast": render_forecast_generic(f_data['today_daily'], f_data['today_hourly'], f_data['taf'], now_miami.strftime("%A, %b %d"))
     elif view_mode == "Tomorrow's Forecast": render_forecast_generic(f_data['tomorrow_daily'], f_data['tomorrow_hourly'], f_data['taf'], (now_miami + timedelta(days=1)).strftime("%A, %b %d"))
 
