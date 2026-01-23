@@ -3,6 +3,7 @@ import streamlit.components.v1 as components
 import requests
 import re
 import pandas as pd
+import altair as alt
 from datetime import datetime, timedelta, timezone 
 try:
     from zoneinfo import ZoneInfo
@@ -18,9 +19,17 @@ AWC_METAR_URL = "https://aviationweather.gov/api/data/metar?ids=KMIA&format=raw&
 NWS_POINT_URL = "https://api.weather.gov/points/25.7906,-80.3164"
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
-# --- STYLING & UTILS ---
+# --- GLOBAL STYLES ---
+HIDE_INDEX_CSS = """
+    <style>
+    thead tr th:first-child {display:none}
+    tbody th {display:none}
+    </style>
+    """
+
+# --- UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v25_dampener, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v26_fixed, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -180,8 +189,8 @@ def calculate_smart_trend(master_list):
     return ((N*sum_xy - sum_x*sum_y) / den) * 60
 
 # --- VIEW: LIVE MONITOR ---
-def render_live_dashboard():
-    st.title("🔴 Project Helios: Live Feed")
+def render_live_dashboard(target_temp, show_target):
+    st.title("🔴 Project Helios: Advanced Feed")
     
     if st.button("🔄 Refresh System", type="primary"):
         st.cache_data.clear()
@@ -192,13 +201,18 @@ def render_live_dashboard():
     
     if not history:
         st.error("Connection Failed: No Data Available")
-        if err: st.warning(f"Debug Error: {err}")
         return
 
     latest = history[0]
     high_mark = max(history, key=lambda x: x['Temp'])
     high_round = int(round(high_mark['Temp']))
     smart_trend = calculate_smart_trend(history)
+
+    # --- VOLATILITY DAMPENER (PHYSICS ENGINE) ---
+    # Clamp trend to prevent extreme projections
+    safe_trend = smart_trend
+    if safe_trend > 1.5: safe_trend = 1.5
+    if safe_trend < -1.5: safe_trend = -1.5
 
     now_miami = get_miami_time()
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
@@ -211,17 +225,24 @@ def render_live_dashboard():
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
-    with col2:
-        st.metric("Official Round", f"{latest['Official']}°F")
-    with c3:
-        st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
-    with c4:
-        st.metric("Solar Fuel", solar_fuel)
+    # Physics Alert
+    physics_alert = ""
+    if latest.get('DewPoint'):
+        spread = latest['Temp'] - latest['DewPoint']
+        if spread < 3 and not is_night:
+            physics_alert = "⚠️ SATURATION RISK (Humidity High, Temp Capped)"
 
-    # --- PROJECTION BOARD ---
+    # --- METRICS LAYOUT ---
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
+    with c2: st.metric("Official Round", f"{latest['Official']}°F")
+    with c3: st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
+    with c4: st.metric("Solar Fuel", solar_fuel)
+
+    if physics_alert: st.warning(physics_alert)
+
+    # --- TEXT PROJECTION BOX ---
+    projections = []
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -235,20 +256,13 @@ def render_live_dashboard():
     else:
         proj_vals = []
         curr_temp = latest['Temp']
-        
-        # CLAMP TREND FOR PROJECTION LOGIC (Dampener)
-        # Prevents runaway projections if one hour was extreme
-        safe_trend = max(min(smart_trend, 1.5), -1.5)
-        
         for i, f in enumerate(next_3_hours):
             nws_temp = f['temperature']
-            
-            # REDUCED TREND WEIGHT FOR STABILITY
-            # Old: 0.6 / (i+1) -> New: 0.4 / (i+1)
-            # This leans 60% on NWS Forecast in hour 1, instead of 40%
+            # DAMPENED WEIGHTING: 40% Trend, 60% Forecast
             trend_weight = 0.4 / (i + 1)
             model_weight = 1.0 - trend_weight
             
+            # Use 'safe_trend' instead of raw 'smart_trend'
             raw_proj = (curr_temp + (safe_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
             
             if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
@@ -265,8 +279,10 @@ def render_live_dashboard():
     elif smart_trend < -0.1: trend_icon = "↘️ Falling"
     else: trend_icon = "➡️ Flat"
 
+    # Display Safe Trend in Text Box
     st.success(f"**📈 TREND:** {trend_icon} ({smart_trend:+.2f}°F/hr) \n\n **🔮 PROJECTION:** {proj_str}")
 
+    # --- SENSOR TABLE ---
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
@@ -295,35 +311,81 @@ def render_live_dashboard():
             "Src": row['Source'],
             "Condition": f"{icon} {sky_code}",
             "Temp": row['Temp'],
-            "Official (Rnd)": row['Official'],
+            "Official": row['Official'],
             "Velocity": vel_str,
             "Wind": row['Wind']
         })
         
     df = pd.DataFrame(clean_rows)
     df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
-    df = df.rename(columns={"Temp": "Temp (°F)", "Official (Rnd)": "Official (Rnd)"})
-    
-    hide_table_row_index = """
-        <style>
-        thead tr th:first-child {display:none}
-        tbody th {display:none}
-        </style>
-        """
-    st.markdown(hide_table_row_index, unsafe_allow_html=True)
+    df = df.rename(columns={"Temp": "Temp (°F)", "Official": "Official (Rnd)"})
+    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     st.table(df)
+
+    # --- ADVANCED CHARTING (Using Dampened Physics) ---
+    st.subheader("🔭 Trajectory Analysis")
+    
+    chart_data = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=4)
+    
+    # 1. Actuals
+    for row in history:
+        if row['dt_utc'] > cutoff:
+            try:
+                local_time = row['dt_utc'].astimezone(ZoneInfo("US/Eastern"))
+            except:
+                local_time = row['dt_utc'].astimezone(timezone(timedelta(hours=-5)))
+            chart_data.append({"Time": local_time, "Temp": row['Temp'], "Type": "Actual"})
+            
+    # 2. Projections (Using Safe Trend)
+    current_miami = get_miami_time()
+    curr_temp = latest['Temp']
+    for i in range(1, 4):
+        future_time = current_miami + timedelta(hours=i)
+        trend_weight = 0.4 / i
+        model_weight = 1.0 - trend_weight
+        
+        nws_temp = curr_temp 
+        for h in f_data['all_hourly']:
+            h_dt = parse_iso_time(h['startTime'])
+            if h_dt:
+                try: h_dt_miami = h_dt.astimezone(ZoneInfo("US/Eastern"))
+                except: h_dt_miami = h_dt.astimezone(timezone(timedelta(hours=-5)))
+                if abs((h_dt_miami - future_time).total_seconds()) < 3600:
+                    nws_temp = h['temperature']; break
+        
+        # Use SAFE_TREND here
+        proj_val = (curr_temp + (safe_trend * i)) * trend_weight + (nws_temp * model_weight)
+        if is_night: proj_val -= (0.5 * i)
+        chart_data.append({"Time": future_time, "Temp": proj_val, "Type": "Projection"})
+
+    df_chart = pd.DataFrame(chart_data)
+    
+    # Chart
+    base = alt.Chart(df_chart).encode(
+        x=alt.X('Time:T', axis=alt.Axis(format='%I:%M %p')),
+        y=alt.Y('Temp:Q', scale=alt.Scale(zero=False, padding=1)),
+        color=alt.Color('Type', scale=alt.Scale(domain=['Actual', 'Projection'], range=['#3498db', '#f1c40f']))
+    )
+    lines = base.mark_line().encode(strokeDash=alt.condition(alt.datum.Type == 'Projection', alt.value([5, 5]), alt.value([0])))
+    points = base.mark_circle(size=60)
+    
+    layers = lines + points
+    if show_target:
+        rule = alt.Chart(pd.DataFrame({'y': [target_temp]})).mark_rule(color='red', strokeWidth=2).encode(y='y')
+        layers = layers + rule
+    
+    st.altair_chart(layers.interactive(), use_container_width=True)
+    caption_txt = "🔵 Solid: Actual Data | 🟡 Dashed: AI Projection (Dampened)"
+    if show_target: caption_txt += f" | 🔴 Red Line: {target_temp}°F Target"
+    st.caption(caption_txt)
+
 
 # --- VIEW: FORECAST RENDERER ---
 def render_forecast_generic(daily, hourly, taf, date_label):
     st.title(f"☀️ Helios Forecast: {date_label}")
-    
-    if st.button(f"🔄 Refresh {date_label}"):
-        st.cache_data.clear()
-        st.rerun()
-    
-    if not hourly:
-        st.warning(f"Forecast data unavailable for {date_label}.")
-        return
+    if st.button(f"🔄 Refresh {date_label}"): st.cache_data.clear(); st.rerun()
+    if not hourly: st.warning(f"Forecast data unavailable for {date_label}."); return
 
     score = 10
     rain_hours = 0
@@ -331,7 +393,6 @@ def render_forecast_generic(daily, hourly, taf, date_label):
         s = h['shortForecast'].lower()
         if "rain" in s or "shower" in s: rain_hours += 1
         if "thunder" in s: rain_hours += 2 
-    
     if rain_hours > 0: score -= 2        
     if rain_hours > 4: score -= 2        
     score = max(1, min(10, score))
@@ -355,47 +416,22 @@ def render_forecast_generic(daily, hourly, taf, date_label):
         if "Rain" in short: icon = "🌧️"
         if "Thunder" in short: icon = "⛈️"
         if "Clear" in short: icon = "🌙"
-        
-        risk_level = "Safe"
-        if "Rain" in short or "Thunder" in short: risk_level = "⚠️ RISK"
-
-        h_data.append({
-            "Time": dt.strftime("%I %p"),
-            "Temp": h['temperature'],
-            "Condition": f"{icon} {short}",
-            "Wind": f"{h['windDirection']} {h['windSpeed']}",
-            "Trade Risk": risk_level
-        })
+        risk = "Safe"
+        if "Rain" in short or "Thunder" in short: risk = "⚠️ RISK"
+        h_data.append({"Time": dt.strftime("%I %p"), "Temp": h['temperature'], "Condition": f"{icon} {short}", "Wind": f"{h['windDirection']} {h['windSpeed']}", "Trade Risk": risk})
 
     df_h = pd.DataFrame(h_data)
     df_h['Temp'] = df_h['Temp'].apply(lambda x: f"{x:.0f}")
     df_h = df_h.rename(columns={"Temp": "Temp (°F)"})
-    
-    hide_table_row_index = """
-        <style>
-        thead tr th:first-child {display:none}
-        tbody th {display:none}
-        </style>
-        """
-    st.markdown(hide_table_row_index, unsafe_allow_html=True)
+    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     st.table(df_h)
-
-    if taf:
-        st.divider()
-        st.caption("✈️ AVIATION TAF (PILOT DATA)")
-        st.code(taf, language="text")
+    if taf: st.divider(); st.caption("✈️ AVIATION TAF (PILOT DATA)"); st.code(taf, language="text")
 
 # --- MAIN APP ---
 def main():
     st.sidebar.header("PROJECT HELIOS ☀️")
     st.sidebar.caption("High-Frequency Weather Algo")
-    
-    view_mode = st.sidebar.radio("Command Deck:", [
-        "Live Monitor", 
-        "Today's Forecast", 
-        "Tomorrow's Forecast"
-    ])
-    
+    view_mode = st.sidebar.radio("Command Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
     
     auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=False)
@@ -411,31 +447,19 @@ def main():
             height=0
         )
 
+    # DYNAMIC TARGET INPUT
+    show_target = st.sidebar.checkbox("🎯 Active Target Line", value=True)
+    target_temp = 76.0 
+    if show_target:
+        target_temp = st.sidebar.number_input("Strike Price", value=76.0, step=0.1, format="%.1f")
+
     now_miami = get_miami_time()
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
-
     f_data = fetch_forecast_data()
-
-    if view_mode == "Live Monitor":
-        render_live_dashboard()
-        
-    elif view_mode == "Today's Forecast":
-        today_lbl = now_miami.strftime("%A, %b %d")
-        render_forecast_generic(
-            f_data['today_daily'], 
-            f_data['today_hourly'], 
-            f_data['taf'], 
-            today_lbl
-        )
-        
-    elif view_mode == "Tomorrow's Forecast":
-        tomorrow_lbl = (now_miami + timedelta(days=1)).strftime("%A, %b %d")
-        render_forecast_generic(
-            f_data['tomorrow_daily'], 
-            f_data['tomorrow_hourly'], 
-            f_data['taf'], 
-            tomorrow_lbl
-        )
+    
+    if view_mode == "Live Monitor": render_live_dashboard(target_temp, show_target)
+    elif view_mode == "Today's Forecast": render_forecast_generic(f_data['today_daily'], f_data['today_hourly'], f_data['taf'], now_miami.strftime("%A, %b %d"))
+    elif view_mode == "Tomorrow's Forecast": render_forecast_generic(f_data['tomorrow_daily'], f_data['tomorrow_hourly'], f_data['taf'], (now_miami + timedelta(days=1)).strftime("%A, %b %d"))
 
 if __name__ == "__main__":
     main()
