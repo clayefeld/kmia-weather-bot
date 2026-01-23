@@ -29,7 +29,7 @@ HIDE_INDEX_CSS = """
 
 # --- UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v22_layout, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v23_target, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -189,7 +189,7 @@ def calculate_smart_trend(master_list):
     return ((N*sum_xy - sum_x*sum_y) / den) * 60
 
 # --- VIEW: LIVE MONITOR ---
-def render_live_dashboard():
+def render_live_dashboard(target_temp):
     st.title("🔴 Project Helios: Advanced Feed")
     
     if st.button("🔄 Refresh System", type="primary"):
@@ -270,7 +270,7 @@ def render_live_dashboard():
 
     st.success(f"**📈 TREND:** {trend_icon} ({smart_trend:+.2f}°F/hr) \n\n **🔮 PROJECTION:** {proj_str}")
 
-    # --- SENSOR TABLE (NOW ABOVE CHART) ---
+    # --- SENSOR TABLE ---
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:12]): 
@@ -309,7 +309,7 @@ def render_live_dashboard():
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     st.table(df)
 
-    # --- ADVANCED CHARTING (NOW AT BOTTOM) ---
+    # --- ADVANCED CHARTING (Dynamic Target) ---
     st.subheader("🔭 Trajectory Analysis")
     
     chart_data = []
@@ -355,9 +355,12 @@ def render_live_dashboard():
     )
     lines = base.mark_line().encode(strokeDash=alt.condition(alt.datum.Type == 'Projection', alt.value([5, 5]), alt.value([0])))
     points = base.mark_circle(size=60)
-    rule = alt.Chart(pd.DataFrame({'y': [76]})).mark_rule(color='red', strokeWidth=2).encode(y='y')
+    
+    # DYNAMIC TARGET LINE
+    rule = alt.Chart(pd.DataFrame({'y': [target_temp]})).mark_rule(color='red', strokeWidth=2).encode(y='y')
+    
     st.altair_chart((lines + points + rule).interactive(), use_container_width=True)
-    st.caption("🔵 Solid: Actual Data | 🟡 Dashed: AI Projection | 🔴 Red Line: 76°F Target")
+    st.caption(f"🔵 Solid: Actual Data | 🟡 Dashed: AI Projection | 🔴 Red Line: {target_temp}°F Target")
 
 
 # --- VIEW: FORECAST RENDERER ---
@@ -412,12 +415,18 @@ def main():
     st.sidebar.caption("High-Frequency Weather Algo")
     view_mode = st.sidebar.radio("Command Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
+    
     auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=False)
     if auto_refresh: components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 60000);</script>""", height=0)
+
+    # DYNAMIC TARGET INPUT
+    target_temp = st.sidebar.number_input("🎯 Daily Strike Price", value=76.0, step=0.1, format="%.1f")
+
     now_miami = get_miami_time()
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
     f_data = fetch_forecast_data()
-    if view_mode == "Live Monitor": render_live_dashboard()
+    
+    if view_mode == "Live Monitor": render_live_dashboard(target_temp)
     elif view_mode == "Today's Forecast": render_forecast_generic(f_data['today_daily'], f_data['today_hourly'], f_data['taf'], now_miami.strftime("%A, %b %d"))
     elif view_mode == "Tomorrow's Forecast": render_forecast_generic(f_data['tomorrow_daily'], f_data['tomorrow_hourly'], f_data['taf'], (now_miami + timedelta(days=1)).strftime("%A, %b %d"))
 
