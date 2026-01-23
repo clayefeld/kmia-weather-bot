@@ -63,20 +63,16 @@ class KalshiAuth:
         return base64.b64encode(signature).decode('utf-8')
 
 # --- PRICE FETCHER ---
-@st.cache_data(ttl=60) # Cache prices for 60s to avoid spamming API
+@st.cache_data(ttl=60)
 def fetch_market_prices():
-    """
-    Returns a dict of {strike_price: yes_ask_price} for today's Miami High.
-    """
     prices = {}
     if not CRYPTO_AVAILABLE: return prices
-    
     auth = KalshiAuth()
     if not auth.ready: return prices
 
     try:
         now_miami = datetime.now(ZoneInfo("US/Eastern"))
-        date_str = now_miami.strftime("%y%b%d").upper() # 26JAN23
+        date_str = now_miami.strftime("%y%b%d").upper() 
         event_ticker = f"KXHIGHMIA-{date_str}"
         
         path = f"/events/{event_ticker}"
@@ -96,8 +92,11 @@ def fetch_market_prices():
             for m in data.get('markets', []):
                 strike = m.get('floor_strike')
                 ask = m.get('yes_ask')
-                # Handle "76 or below" which might have a different floor structure
-                # Sometimes it's just the lowest bracket found.
+                # If strike is missing, try cap_strike for low bracket
+                if strike is None:
+                    cap = m.get('cap_strike')
+                    if cap and cap <= 77: strike = 76.0 # Heuristic for "76 or below"
+                
                 if strike is not None and ask is not None:
                     prices[float(strike)] = ask
                     
@@ -106,7 +105,7 @@ def fetch_market_prices():
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v42_livebuttons, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v43_fix, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -292,7 +291,7 @@ def fetch_forecast_data():
                 for p in periods:
                     data["all_hourly"].append(p)
                     if tomorrow_str in p['startTime']: data["tomorrow_hourly"].append(p)
-                    if today_str in p['startTime']: data["today_hourly"].append(p)
+                    if today_str in p['startTime'] and p['isDaytime']: data["today_hourly"].append(p)
         
         r_t = requests.get(AWC_TAF_URL, timeout=5)
         if r_t.status_code == 200: data["taf"] = r_t.text
@@ -426,6 +425,17 @@ def render_live_dashboard(target_temp, bracket_label, manual_price):
 
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
 
+    # TARGET STATUS CHECK
+    status_msg = "❄️ COLD"
+    if target_temp - 0.5 <= latest['Temp'] < target_temp:
+        status_msg = f"⚠️ TRAP ZONE (Within 0.5° of {target_temp})"
+        st.warning(f"**BRACKET STATUS ({bracket_label}):** {status_msg}")
+    elif latest['Temp'] >= target_temp:
+        status_msg = f"✅ TARGET SECURED (Above {target_temp})"
+        st.success(f"**BRACKET STATUS ({bracket_label}):** {status_msg}")
+    else:
+        st.caption(f"**BRACKET STATUS ({bracket_label}):** {status_msg} (Gap: {target_temp - latest['Temp']:.2f}°F)")
+
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
@@ -538,11 +548,13 @@ def main():
         try: default_target = float(st.query_params["target"])
         except: pass
     
-    # Helper
+    # Helper to set params & FORCE SLIDER UPDATE
     def set_target(val, price):
         st.query_params["target"] = str(val)
         if price is not None:
             st.query_params["price"] = str(price)
+            # MAGIC FIX: Force the session state to update immediately
+            st.session_state["price_slider"] = int(price)
             
     # Fetch Prices
     prices = fetch_market_prices()
