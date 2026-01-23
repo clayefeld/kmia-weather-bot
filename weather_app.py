@@ -20,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v1, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v13_static, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -275,24 +275,20 @@ def render_live_dashboard():
         
         clean_rows.append({
             "Time": get_display_time(row['dt_utc']),
-            "Src": row['Source'],
+            "Source": row['Source'],
             "Temp": row['Temp'],
-            "Trend": vel_str,
+            "Velocity": vel_str,
             "Wind": row['Wind'],
             "Sky": row['Sky']
         })
         
     df = pd.DataFrame(clean_rows)
-    st.dataframe(
-        df,
-        column_config={
-            "Temp": st.column_config.NumberColumn("Temp (°F)", format="%.2f", step=0.1),
-            "Trend": st.column_config.TextColumn("Velocity"),
-            "Src": st.column_config.TextColumn("Source", width="small"),
-        },
-        use_container_width=True,
-        hide_index=True
-    )
+    
+    # FORMAT FOR STATIC TABLE
+    df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
+    df = df.rename(columns={"Temp": "Temp (°F)"})
+    
+    st.table(df)
 
 # --- VIEW: FORECAST RENDERER ---
 def render_forecast_generic(daily, hourly, taf, date_label):
@@ -345,19 +341,16 @@ def render_forecast_generic(daily, hourly, taf, date_label):
             "Temp": h['temperature'],
             "Condition": f"{icon} {short}",
             "Wind": f"{h['windDirection']} {h['windSpeed']}",
-            "Status": risk_level
+            "Trade Risk": risk_level
         })
 
     df_h = pd.DataFrame(h_data)
-    st.dataframe(
-        df_h,
-        column_config={
-            "Temp": st.column_config.NumberColumn("Temp (°F)", format="%d"),
-            "Status": st.column_config.TextColumn("Trade Risk"),
-        },
-        use_container_width=True,
-        hide_index=True
-    )
+    
+    # FORMAT FOR STATIC TABLE
+    df_h['Temp'] = df_h['Temp'].apply(lambda x: f"{x:.0f}")
+    df_h = df_h.rename(columns={"Temp": "Temp (°F)"})
+    
+    st.table(df_h)
 
     if taf:
         st.divider()
