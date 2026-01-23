@@ -27,7 +27,7 @@ HIDE_INDEX_CSS = """
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v39_sticky, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v40_sticky_target, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -247,6 +247,7 @@ def render_live_dashboard(target_temp, show_target, manual_price):
     history, err = fetch_live_history()
     f_data = fetch_forecast_data()
     
+    clean_rows = []
     if not history:
         st.error("Connection Failed: No Data Available")
         return
@@ -439,43 +440,41 @@ def main():
     view_mode = st.sidebar.radio("Command Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
     
-    # 1. READ PARAMS (STICKY STATE)
-    # If URL is .../?auto=true&price=80, we use those defaults.
-    
-    # Auto-Refresh Logic
+    # 1. READ STICKY STATES (URL)
     default_auto = False
     if "auto" in st.query_params and st.query_params["auto"] == "true":
         default_auto = True
         
     auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=default_auto)
     
-    # Update URL if checkbox changes
     if auto_refresh:
         st.query_params["auto"] = "true"
-        # The JS Reloader
         components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 60000);</script>""", height=0)
     else:
         if "auto" in st.query_params: del st.query_params["auto"]
 
-    # DYNAMIC TARGET INPUT
+    # 2. STICKY TARGET
     show_target = st.sidebar.checkbox("🎯 Active Target Line", value=True)
+    default_target = 76.0
+    if "target" in st.query_params:
+        try: default_target = float(st.query_params["target"])
+        except: pass
+        
     target_temp = 76.0 
     if show_target:
-        target_temp = st.sidebar.number_input("Strike Price", value=76.0, step=0.1, format="%.1f")
+        target_temp = st.sidebar.number_input("Strike Price", value=default_target, step=0.1, format="%.1f")
+        if target_temp != default_target:
+            st.query_params["target"] = str(target_temp)
 
-    # KALSHI MARKET INPUT (STICKY)
+    # 3. STICKY MARKET PRICE
     st.sidebar.divider()
     st.sidebar.markdown("**📉 Market Sentiment**")
-    
-    # Read persistent price from URL
     default_price = 50
     if "price" in st.query_params:
         try: default_price = int(st.query_params["price"])
         except: pass
         
     manual_price = st.sidebar.slider("Current Market Price (Yes)", 1, 99, default_price)
-    
-    # If slider moves, update URL immediately
     if manual_price != default_price:
         st.query_params["price"] = str(manual_price)
 
