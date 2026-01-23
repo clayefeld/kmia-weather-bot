@@ -20,10 +20,9 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v17_restore, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v25_dampener, myemail@example.com)'}
 
 def get_miami_time():
-    """Returns the current time explicitly in US/Eastern (Miami Time)"""
     try:
         return datetime.now(ZoneInfo("US/Eastern"))
     except:
@@ -53,6 +52,10 @@ def fetch_live_history():
                 props = item.get('properties', {})
                 temp_c = props.get('temperature', {}).get('value')
                 if temp_c is None: continue
+                
+                dew_c = props.get('dewpoint', {}).get('value')
+                dew_f = (dew_c * 1.8) + 32 if dew_c is not None else None
+
                 ts = props.get('timestamp')
                 if not ts: continue
                 dt_utc = datetime.fromisoformat(ts.split('+')[0]).replace(tzinfo=timezone.utc)
@@ -72,6 +75,7 @@ def fetch_live_history():
                     "dt_utc": dt_utc,
                     "Source": "NWS",
                     "Temp": f_val,
+                    "DewPoint": dew_f,
                     "Official": int(round(f_val)),
                     "Wind": w_str,
                     "Sky": sky_str,
@@ -112,6 +116,7 @@ def fetch_live_history():
                         "dt_utc": dt_utc,
                         "Source": "AWC",
                         "Temp": f_val,
+                        "DewPoint": None,
                         "Official": int(round(f_val)),
                         "Wind": w_str,
                         "Sky": sky,
@@ -124,11 +129,7 @@ def fetch_live_history():
 
 @st.cache_data(ttl=300)
 def fetch_forecast_data():
-    data = {
-        "today_daily": None, "today_hourly": [],
-        "tomorrow_daily": None, "tomorrow_hourly": [],
-        "taf": None, "all_hourly": []
-    }
+    data = {"today_daily": None, "today_hourly": [], "tomorrow_daily": None, "tomorrow_hourly": [], "taf": None, "all_hourly": []}
     try:
         r = requests.get(NWS_POINT_URL, headers=get_headers(), timeout=5)
         if r.status_code == 200:
@@ -144,22 +145,17 @@ def fetch_forecast_data():
             if r_d.status_code == 200:
                 periods = r_d.json().get('properties', {}).get('periods', [])
                 for p in periods:
-                    if tomorrow_str in p['startTime'] and p['isDaytime']:
-                        data["tomorrow_daily"] = p
-                    if today_str in p['startTime'] and p['isDaytime']:
-                        data["today_daily"] = p
-                    if not data["today_daily"] and today_str in p['startTime']:
-                         data["today_daily"] = p
+                    if tomorrow_str in p['startTime'] and p['isDaytime']: data["tomorrow_daily"] = p
+                    if today_str in p['startTime'] and p['isDaytime']: data["today_daily"] = p
+                    if not data["today_daily"] and today_str in p['startTime']: data["today_daily"] = p
 
             r_h = requests.get(hourly_url, headers=get_headers(), timeout=5)
             if r_h.status_code == 200:
                 periods = r_h.json().get('properties', {}).get('periods', [])
                 for p in periods:
                     data["all_hourly"].append(p)
-                    if tomorrow_str in p['startTime']:
-                        data["tomorrow_hourly"].append(p)
-                    if today_str in p['startTime']:
-                        data["today_hourly"].append(p)
+                    if tomorrow_str in p['startTime']: data["tomorrow_hourly"].append(p)
+                    if today_str in p['startTime']: data["today_hourly"].append(p)
         
         r_t = requests.get(AWC_TAF_URL, timeout=5)
         if r_t.status_code == 200: data["taf"] = r_t.text
@@ -207,8 +203,8 @@ def render_live_dashboard():
     now_miami = get_miami_time()
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
     time_left = sunset_miami - now_miami
-    
     is_night = time_left.total_seconds() <= 0
+    
     solar_fuel = "NIGHT"
     if not is_night:
         hrs, rem = divmod(time_left.seconds, 3600)
@@ -220,9 +216,9 @@ def render_live_dashboard():
         st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
     with col2:
         st.metric("Official Round", f"{latest['Official']}°F")
-    with col3:
+    with c3:
         st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
-    with col4:
+    with c4:
         st.metric("Solar Fuel", solar_fuel)
 
     # --- PROJECTION BOARD ---
@@ -239,11 +235,22 @@ def render_live_dashboard():
     else:
         proj_vals = []
         curr_temp = latest['Temp']
+        
+        # CLAMP TREND FOR PROJECTION LOGIC (Dampener)
+        # Prevents runaway projections if one hour was extreme
+        safe_trend = max(min(smart_trend, 1.5), -1.5)
+        
         for i, f in enumerate(next_3_hours):
             nws_temp = f['temperature']
-            trend_weight = 0.6 / (i + 1)
+            
+            # REDUCED TREND WEIGHT FOR STABILITY
+            # Old: 0.6 / (i+1) -> New: 0.4 / (i+1)
+            # This leans 60% on NWS Forecast in hour 1, instead of 40%
+            trend_weight = 0.4 / (i + 1)
             model_weight = 1.0 - trend_weight
-            raw_proj = (curr_temp + (smart_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
+            
+            raw_proj = (curr_temp + (safe_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
+            
             if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
             if solar_fuel == "NIGHT": raw_proj -= (0.5 * (i+1))
             icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
@@ -274,9 +281,8 @@ def render_live_dashboard():
                 elif v < -0.5: vel_str = "⬇️ Drop"
                 elif v < -0.1: vel_str = "↘️ Falling"
         
-        # Icon Logic
         sky_code = row['Sky']
-        icon = "☁️" # Default
+        icon = "☁️" 
         if "CLR" in sky_code or "SKC" in sky_code:
             icon = "🌙" if is_night else "☀️"
         elif "FEW" in sky_code: icon = "🌤️"
@@ -289,22 +295,15 @@ def render_live_dashboard():
             "Src": row['Source'],
             "Condition": f"{icon} {sky_code}",
             "Temp": row['Temp'],
-            "Official": row['Official'],
+            "Official (Rnd)": row['Official'],
             "Velocity": vel_str,
             "Wind": row['Wind']
         })
         
     df = pd.DataFrame(clean_rows)
-    # Formatting
     df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
+    df = df.rename(columns={"Temp": "Temp (°F)", "Official (Rnd)": "Official (Rnd)"})
     
-    # Rename columns for display
-    df = df.rename(columns={
-        "Temp": "Temp (°F)",
-        "Official": "Official (Rnd)"
-    })
-    
-    # CSS HACK to hide the index column (Left Column)
     hide_table_row_index = """
         <style>
         thead tr th:first-child {display:none}
