@@ -267,3 +267,110 @@ def render_forecast_generic(daily, hourly, taf, date_label):
     if st.button(f"🔄 Refresh {date_label}"):
         st.cache_data.clear()
         st.rerun()
+    
+    if not hourly:
+        st.warning(f"Forecast data unavailable for {date_label}.")
+        return
+
+    # --- SCORE LOGIC ---
+    score = 10
+    rain_hours = 0
+    for h in hourly:
+        s = h['shortForecast'].lower()
+        if "rain" in s or "shower" in s: rain_hours += 1
+        if "thunder" in s: rain_hours += 2 
+    
+    if rain_hours > 0: score -= 2        
+    if rain_hours > 4: score -= 2        
+    score = max(1, min(10, score))
+    
+    # --- HEADER METRICS ---
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.metric("Confidence Score", f"{score}/10")
+        st.progress(score/10)
+    with c2:
+        if daily:
+            st.success(f"**Analyst Note:** {daily['detailedForecast']}")
+            st.caption(f"Winds: {daily['windSpeed']} • Temp: {daily['temperature']}°F")
+
+    # --- HOURLY TABLE ---
+    st.subheader("Hourly Breakdown")
+    h_data = []
+    for h in hourly:
+        dt = parse_iso_time(h['startTime'])
+        short = h['shortForecast']
+        icon = "☁️"
+        if "Sunny" in short: icon = "☀️"
+        if "Rain" in short: icon = "🌧️"
+        if "Thunder" in short: icon = "⛈️"
+        if "Clear" in short: icon = "🌙"
+        
+        risk_level = "Safe"
+        if "Rain" in short or "Thunder" in short: risk_level = "⚠️ RISK"
+
+        h_data.append({
+            "Time": dt.strftime("%I %p"),
+            "Temp": h['temperature'],
+            "Condition": f"{icon} {short}",
+            "Wind": f"{h['windDirection']} {h['windSpeed']}",
+            "Status": risk_level
+        })
+
+    df_h = pd.DataFrame(h_data)
+    st.dataframe(
+        df_h,
+        column_config={
+            "Temp": st.column_config.NumberColumn("Temp (°F)", format="%d"),
+            "Status": st.column_config.TextColumn("Trade Risk"),
+        },
+        use_container_width=True,
+        hide_index=True
+    )
+
+    if taf:
+        st.divider()
+        st.caption("✈️ AVIATION TAF (PILOT DATA)")
+        st.code(taf, language="text")
+
+# --- MAIN APP ---
+def main():
+    st.sidebar.header("Navigation")
+    
+    # Updated Navigation Options
+    view_mode = st.sidebar.radio("Select View:", [
+        "Live Monitor", 
+        "Today's Forecast", 
+        "Tomorrow's Forecast"
+    ])
+    
+    st.sidebar.divider()
+    est_now = get_est_now()
+    st.sidebar.caption(f"Last Load: {est_now.strftime('%I:%M:%S %p')} EST")
+
+    # Fetch all data once to share across tabs if needed
+    f_data = fetch_forecast_data()
+
+    if view_mode == "Live Monitor":
+        render_live_dashboard()
+        
+    elif view_mode == "Today's Forecast":
+        today_lbl = est_now.strftime("%A, %b %d (Today)")
+        render_forecast_generic(
+            f_data['today_daily'], 
+            f_data['today_hourly'], 
+            f_data['taf'], 
+            today_lbl
+        )
+        
+    elif view_mode == "Tomorrow's Forecast":
+        tomorrow_lbl = (est_now + timedelta(days=1)).strftime("%A, %b %d (Tomorrow)")
+        render_forecast_generic(
+            f_data['tomorrow_daily'], 
+            f_data['tomorrow_hourly'], 
+            f_data['taf'], 
+            tomorrow_lbl
+        )
+
+if __name__ == "__main__":
+    main()
