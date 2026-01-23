@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import re
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone 
 # standard library usually available, but we wrap in try just in case
 try:
     from zoneinfo import ZoneInfo
@@ -21,7 +21,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(myweatherbot_v8_zoneinfo, myemail@example.com)'}
+    return {'User-Agent': '(myweatherbot_v9_fixed, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -39,12 +39,17 @@ def parse_iso_time(iso_str):
 
 def get_display_time(dt_utc):
     # Convert any UTC timestamp to Miami Time for display
-    dt_miami = dt_utc.astimezone(ZoneInfo("US/Eastern"))
+    try:
+        dt_miami = dt_utc.astimezone(ZoneInfo("US/Eastern"))
+    except:
+        dt_miami = dt_utc.astimezone(timezone(timedelta(hours=-5)))
     return dt_miami.strftime("%I:%M %p")
 
 # --- FETCHERS ---
 def fetch_live_history():
     data_list = []
+    error_msg = None
+    
     # 1. NWS History
     try:
         r = requests.get(NWS_API_HISTORY, headers=get_headers(), timeout=4)
@@ -77,7 +82,8 @@ def fetch_live_history():
                     "Wind": w_str,
                     "Sky": sky_str
                 })
-    except: pass
+    except Exception as e:
+        error_msg = str(e)
 
     # 2. Aviation METAR
     try:
@@ -113,9 +119,10 @@ def fetch_live_history():
                         "Wind": w_str,
                         "Sky": sky
                     })
-    except: pass
+    except Exception as e:
+        if not error_msg: error_msg = str(e)
     
-    return sorted(data_list, key=lambda x: x['dt_utc'], reverse=True)
+    return sorted(data_list, key=lambda x: x['dt_utc'], reverse=True), error_msg
 
 @st.cache_data(ttl=300)
 def fetch_forecast_data():
@@ -192,9 +199,11 @@ def render_live_dashboard():
         st.cache_data.clear()
         st.rerun()
         
-    history = fetch_live_history()
+    history, err = fetch_live_history()
+    
     if not history:
-        st.error("Connection Failed: No Data")
+        st.error("Connection Failed: No Data Available")
+        if err: st.warning(f"Debug Error: {err}")
         return
 
     latest = history[0]
@@ -343,7 +352,6 @@ def render_forecast_generic(daily, hourly, taf, date_label):
 
 # --- MAIN APP ---
 def main():
-    from datetime import timezone # ensure timezone is imported for fallback
     st.sidebar.header("Navigation")
     
     view_mode = st.sidebar.radio("Select View:", [
