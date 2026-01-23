@@ -19,12 +19,19 @@ AWC_METAR_URL = "https://aviationweather.gov/api/data/metar?ids=KMIA&format=raw&
 NWS_POINT_URL = "https://api.weather.gov/points/25.7906,-80.3164"
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
-# --- STYLING & UTILS ---
+# --- GLOBAL STYLES (Fixed Scope Issue) ---
+HIDE_INDEX_CSS = """
+    <style>
+    thead tr th:first-child {display:none}
+    tbody th {display:none}
+    </style>
+    """
+
+# --- UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v19_hotfix, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v20_stable, myemail@example.com)'}
 
 def get_miami_time():
-    """Returns the current time explicitly in US/Eastern (Miami Time)"""
     try:
         return datetime.now(ZoneInfo("US/Eastern"))
     except:
@@ -55,7 +62,6 @@ def fetch_live_history():
                 temp_c = props.get('temperature', {}).get('value')
                 if temp_c is None: continue
                 
-                # Dewpoint
                 dew_c = props.get('dewpoint', {}).get('value')
                 dew_f = (dew_c * 1.8) + 32 if dew_c is not None else None
 
@@ -228,66 +234,53 @@ def render_live_dashboard():
 
     if physics_alert: st.warning(physics_alert)
 
-    # --- ADVANCED CHARTING: TRAJECTORY INTERCEPT ---
+    # --- ADVANCED CHARTING ---
     st.subheader("🔭 Trajectory Analysis")
     
     chart_data = []
-    # 1. Actual History
     cutoff = datetime.now(timezone.utc) - timedelta(hours=4)
+    
+    # 1. Actuals
     for row in history:
         if row['dt_utc'] > cutoff:
-            # Convert to Miami time for plotting
             try:
                 local_time = row['dt_utc'].astimezone(ZoneInfo("US/Eastern"))
             except:
                 local_time = row['dt_utc'].astimezone(timezone(timedelta(hours=-5)))
             chart_data.append({"Time": local_time, "Temp": row['Temp'], "Type": "Actual"})
             
-    # 2. Projection (Next 3 hours)
+    # 2. Projections
     current_miami = get_miami_time()
     curr_temp = latest['Temp']
-    
     for i in range(1, 4):
         future_time = current_miami + timedelta(hours=i)
-        
-        # Physics Weighting
         trend_weight = 0.6 / i
         model_weight = 1.0 - trend_weight
         
         nws_temp = curr_temp 
-        # Find matching hourly forecast (Timezone Safe)
         for h in f_data['all_hourly']:
             h_dt = parse_iso_time(h['startTime'])
             if h_dt:
-                # Convert NWS time to Miami time for valid comparison
-                try:
-                    h_dt_miami = h_dt.astimezone(ZoneInfo("US/Eastern"))
-                except:
-                    h_dt_miami = h_dt.astimezone(timezone(timedelta(hours=-5)))
-                
-                # Compare absolute difference in seconds
+                try: h_dt_miami = h_dt.astimezone(ZoneInfo("US/Eastern"))
+                except: h_dt_miami = h_dt.astimezone(timezone(timedelta(hours=-5)))
                 if abs((h_dt_miami - future_time).total_seconds()) < 3600:
-                    nws_temp = h['temperature']
-                    break
+                    nws_temp = h['temperature']; break
         
         proj_val = (curr_temp + (smart_trend * i)) * trend_weight + (nws_temp * model_weight)
         if is_night: proj_val -= (0.5 * i)
-        
         chart_data.append({"Time": future_time, "Temp": proj_val, "Type": "Projection"})
 
     df_chart = pd.DataFrame(chart_data)
     
-    # Altair Chart
+    # Chart
     base = alt.Chart(df_chart).encode(
         x=alt.X('Time:T', axis=alt.Axis(format='%I:%M %p')),
         y=alt.Y('Temp:Q', scale=alt.Scale(zero=False, padding=1)),
         color=alt.Color('Type', scale=alt.Scale(domain=['Actual', 'Projection'], range=['#3498db', '#f1c40f']))
     )
-    
     lines = base.mark_line().encode(strokeDash=alt.condition(alt.datum.Type == 'Projection', alt.value([5, 5]), alt.value([0])))
     points = base.mark_circle(size=60)
-    rule = alt.Chart(pd.DataFrame({'y': [76]})).mark_rule(color='red', strokeWidth=2).encode(y='y') # Target Line
-    
+    rule = alt.Chart(pd.DataFrame({'y': [76]})).mark_rule(color='red', strokeWidth=2).encode(y='y')
     st.altair_chart((lines + points + rule).interactive(), use_container_width=True)
     st.caption("🔵 Solid: Actual Data | 🟡 Dashed: AI Projection | 🔴 Red Line: 76°F Target")
 
@@ -327,14 +320,7 @@ def render_live_dashboard():
     df = pd.DataFrame(clean_rows)
     df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
     df = df.rename(columns={"Temp": "Temp (°F)"})
-    
-    hide_table_row_index = """
-        <style>
-        thead tr th:first-child {display:none}
-        tbody th {display:none}
-        </style>
-        """
-    st.markdown(hide_table_row_index, unsafe_allow_html=True)
+    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     st.table(df)
 
 # --- VIEW: FORECAST RENDERER ---
@@ -379,7 +365,7 @@ def render_forecast_generic(daily, hourly, taf, date_label):
     df_h = pd.DataFrame(h_data)
     df_h['Temp'] = df_h['Temp'].apply(lambda x: f"{x:.0f}")
     df_h = df_h.rename(columns={"Temp": "Temp (°F)"})
-    st.markdown(hide_table_row_index, unsafe_allow_html=True)
+    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     st.table(df_h)
     if taf: st.divider(); st.caption("✈️ AVIATION TAF (PILOT DATA)"); st.code(taf, language="text")
 
