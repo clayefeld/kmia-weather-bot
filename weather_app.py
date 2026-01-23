@@ -43,7 +43,10 @@ class KalshiAuth:
     def __init__(self):
         try:
             self.key_id = st.secrets["KALSHI_KEY_ID"]
-            self.private_key_str = st.secrets["KALSHI_PRIVATE_KEY"].replace("\\n", "\n")
+            pk_raw = st.secrets["KALSHI_PRIVATE_KEY"]
+            # Fix common formatting issues with secrets
+            self.private_key_str = pk_raw.replace("\\n", "\n").strip()
+            
             self.private_key = serialization.load_pem_private_key(
                 self.private_key_str.encode(),
                 password=None
@@ -72,24 +75,16 @@ def fetch_market_data():
     """
     if not CRYPTO_AVAILABLE: return [], "🔴 Crypto Lib Missing"
     auth = KalshiAuth()
-    if not auth.ready: return [], "🔴 Keys Missing"
+    if not auth.ready: return [], f"🔴 Key Error: {getattr(auth, 'error', 'Unknown')}"
 
     try:
-        # 1. Find the Event Ticker via Series Search (Robust)
-        # We search for events in the 'KXHIGHMIA' series
-        path = "/events"
-        ts = str(int(time.time() * 1000))
-        # We need to filter by series_ticker query param? 
-        # Kalshi V2 GET signing is tricky with params. 
-        # Safer strategy: Get markets by series_ticker directly if possible, or construct likely ticker.
-        
-        # Let's try the direct date construction again but handle errors gracefully
-        # Standard format is KXHIGHMIA-YYMMMDD e.g. 26JAN23
+        # 1. Construct Event Ticker
         now_miami = datetime.now(ZoneInfo("US/Eastern"))
-        date_str = now_miami.strftime("%y%b%d").upper()
+        date_str = now_miami.strftime("%y%b%d").upper() # e.g. 26JAN23
         event_ticker = f"KXHIGHMIA-{date_str}"
         
         path = f"/events/{event_ticker}"
+        ts = str(int(time.time() * 1000))
         sig = auth.sign_request("GET", path, ts)
         
         headers = {
@@ -107,6 +102,8 @@ def fetch_market_data():
             
         data = r.json()
         raw_markets = data.get('markets', [])
+        if not raw_markets:
+            return [], "🔴 No Markets Found"
         
         parsed_markets = []
         for m in raw_markets:
@@ -137,7 +134,7 @@ def fetch_market_data():
                 # Lowest bracket
                 val = m['cap'] if m['cap'] else m['floor']
                 label = f"{val} or below"
-                strike_val = val # For the 'target' logic, use the number itself
+                strike_val = val 
             elif i == count - 1:
                 # Highest bracket
                 val = m['floor'] if m['floor'] else m['cap']
@@ -152,7 +149,7 @@ def fetch_market_data():
                 "price": m['price']
             })
             
-        return final_list, "🟢 Live Market"
+        return final_list, "🟢 Connected"
 
     except Exception as e:
         return [], f"🔴 Error: {str(e)}"
@@ -450,9 +447,9 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
             elif edge < -15: 
                 edge_color = "inverse"
                 edge_label = "🛑 OVERPRICED"
-            st.metric(f"Kalshi Price ({bracket_label})", f"{live_price}¢", f"{edge:+.0f}% Edge ({edge_label})", delta_color=edge_color)
+            st.metric(f"Market Price ({bracket_label})", f"{live_price}¢", f"{edge:+.0f}% Edge ({edge_label})", delta_color=edge_color)
         else:
-            st.metric(f"Kalshi Price ({bracket_label})", "--", "Data Unavailable")
+            st.metric(f"Market Price ({bracket_label})", "--", "API Error")
 
     # --- PROJECTION BOARD ---
     next_3_hours = []
