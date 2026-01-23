@@ -16,7 +16,11 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(myweatherbot_v5_pro, myemail@example.com)'}
+    return {'User-Agent': '(myweatherbot_v6_tz_fix, myemail@example.com)'}
+
+def get_est_now():
+    """Returns the current time explicitly in EST (UTC-5)"""
+    return datetime.now(timezone(timedelta(hours=-5)))
 
 def parse_iso_time(iso_str):
     try:
@@ -112,21 +116,23 @@ def fetch_forecast_data():
             daily_url = props.get('forecast')
             hourly_url = props.get('forecastHourly')
             
+            # Use EST Time for targeting "Tomorrow"
+            est_now = get_est_now()
+            target_date_str = (est_now + timedelta(days=1)).strftime("%Y-%m-%d")
+            
             r_d = requests.get(daily_url, headers=get_headers(), timeout=5)
             if r_d.status_code == 200:
                 periods = r_d.json().get('properties', {}).get('periods', [])
-                target = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
                 for p in periods:
-                    if target in p['startTime'] and p['isDaytime']:
+                    if target_date_str in p['startTime'] and p['isDaytime']:
                         daily_data = p
                         break
             
             r_h = requests.get(hourly_url, headers=get_headers(), timeout=5)
             if r_h.status_code == 200:
                 periods = r_h.json().get('properties', {}).get('periods', [])
-                target = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
                 for p in periods:
-                    if target in p['startTime']:
+                    if target_date_str in p['startTime']:
                         hourly_data.append(p)
         
         r_t = requests.get(AWC_TAF_URL, timeout=5)
@@ -166,13 +172,12 @@ def render_live_dashboard():
 
     latest = history[0]
     high_mark = max(history, key=lambda x: x['Temp'])
-    # NEW: Calculate rounded high
     high_round = int(round(high_mark['Temp']))
     
     smart_trend = calculate_smart_trend(history)
 
-    # Solar Calc
-    now_est = datetime.now(timezone(timedelta(hours=-5)))
+    # Solar Calc (EST Fixed)
+    now_est = get_est_now()
     sunset_est = now_est.replace(hour=17, minute=55, second=0, microsecond=0)
     time_left = sunset_est - now_est
     solar_fuel = "NIGHT"
@@ -188,7 +193,6 @@ def render_live_dashboard():
     with col2:
         st.metric("Official Round", f"{latest['Official']}°F")
     with col3:
-        # UPDATED: Shows "75.92°F ➡ 76°F"
         st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
     with col4:
         st.metric("Solar Fuel", solar_fuel)
@@ -239,8 +243,9 @@ def render_live_dashboard():
 
 # --- VIEW: FORECAST ---
 def render_forecast_dashboard():
-    # UPDATED: Dynamic Date Header
-    target_date = (datetime.now() + timedelta(days=1)).strftime("%A, %b %d")
+    # Use EST Time for Header Date
+    est_now = get_est_now()
+    target_date = (est_now + timedelta(days=1)).strftime("%A, %b %d")
     st.title(f"📅 Forecast for {target_date}")
     
     if st.button("🔄 Refresh Forecast"):
@@ -250,7 +255,7 @@ def render_forecast_dashboard():
     daily, hourly, taf = fetch_forecast_data()
     
     if not hourly:
-        st.warning("Forecast unavailable. Try again later.")
+        st.warning(f"Forecast unavailable for {target_date}. Try again later.")
         return
 
     # --- CORRECTED SCORE LOGIC ---
@@ -272,7 +277,6 @@ def render_forecast_dashboard():
         st.progress(score/10)
     with c2:
         if daily:
-            # UPDATED: Using 'detailedForecast' for full analyst note
             st.success(f"**Analyst Note:** {daily['detailedForecast']}")
             st.caption(f"Winds: {daily['windSpeed']} • High: {daily['temperature']}°F")
 
@@ -319,7 +323,10 @@ def main():
     st.sidebar.header("Navigation")
     view_mode = st.sidebar.radio("Select View:", ["Live Monitor", "Tomorrow's Forecast"])
     st.sidebar.divider()
-    st.sidebar.caption(f"Last Load: {datetime.now().strftime('%H:%M:%S')}")
+    
+    # Show last load time in EST
+    est_time = get_est_now().strftime('%I:%M:%S %p')
+    st.sidebar.caption(f"Last Load: {est_time} EST")
 
     if view_mode == "Live Monitor":
         render_live_dashboard()
