@@ -20,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v15_icons, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v16_reorder, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -287,11 +287,11 @@ def render_live_dashboard():
         clean_rows.append({
             "Time": get_display_time(row['dt_utc']),
             "Src": row['Source'],
+            "Condition": f"{icon} {sky_code}",
             "Temp": row['Temp'],
             "Rnd": row['Official'],
             "Velocity": vel_str,
-            "Wind": row['Wind'],
-            "Condition": f"{icon} {sky_code}"
+            "Wind": row['Wind']
         })
         
     df = pd.DataFrame(clean_rows)
