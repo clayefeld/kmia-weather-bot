@@ -20,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v17_restore, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v17_solarfix, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -204,13 +204,22 @@ def render_live_dashboard():
     high_round = int(round(high_mark['Temp']))
     smart_trend = calculate_smart_trend(history)
 
+    # --- SOLAR FUEL (FIXED LOGIC) ---
     now_miami = get_miami_time()
-    sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
-    time_left = sunset_miami - now_miami
     
-    is_night = time_left.total_seconds() <= 0
+    # Define Sunrise (7:00 AM) and Sunset (5:55 PM)
+    sunrise_miami = now_miami.replace(hour=7, minute=0, second=0, microsecond=0)
+    sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
+    
+    is_night = False
     solar_fuel = "NIGHT"
-    if not is_night:
+    
+    # If it's before 7 AM OR after 5:55 PM, it's NIGHT
+    if now_miami < sunrise_miami or now_miami > sunset_miami:
+        is_night = True
+    else:
+        # It's Day: Calculate remaining sunlight
+        time_left = sunset_miami - now_miami
         hrs, rem = divmod(time_left.seconds, 3600)
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
@@ -245,7 +254,7 @@ def render_live_dashboard():
             model_weight = 1.0 - trend_weight
             raw_proj = (curr_temp + (smart_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
             if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
-            if solar_fuel == "NIGHT": raw_proj -= (0.5 * (i+1))
+            if is_night: raw_proj -= (0.5 * (i+1))
             icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
             if "Sunny" in f['shortForecast']: icon = "☀️"
             proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
