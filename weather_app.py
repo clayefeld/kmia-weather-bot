@@ -38,7 +38,7 @@ HIDE_INDEX_CSS = """
     </style>
     """
 
-# --- KALSHI CLIENT (SECURE) ---
+# --- KALSHI CLIENT ---
 class KalshiAuth:
     def __init__(self):
         try:
@@ -62,13 +62,16 @@ class KalshiAuth:
         )
         return base64.b64encode(signature).decode('utf-8')
 
-# --- PRICE FETCHER ---
+# --- DYNAMIC MARKET FETCHER ---
 @st.cache_data(ttl=60)
-def fetch_market_prices():
-    prices = {}
-    if not CRYPTO_AVAILABLE: return prices
+def fetch_market_data():
+    """
+    Returns a sorted list of dicts: [{'label': '81-82', 'strike': 81.0, 'price': 50}, ...]
+    """
+    markets_list = []
+    if not CRYPTO_AVAILABLE: return []
     auth = KalshiAuth()
-    if not auth.ready: return prices
+    if not auth.ready: return []
 
     try:
         now_miami = datetime.now(ZoneInfo("US/Eastern"))
@@ -90,22 +93,46 @@ def fetch_market_prices():
         if r.status_code == 200:
             data = r.json()
             for m in data.get('markets', []):
-                strike = m.get('floor_strike')
-                ask = m.get('yes_ask')
-                # If strike is missing, try cap_strike for low bracket
-                if strike is None:
-                    cap = m.get('cap_strike')
-                    if cap and cap <= 77: strike = 76.0 # Heuristic for "76 or below"
+                floor = m.get('floor_strike')
+                cap = m.get('cap_strike')
+                ask = m.get('yes_ask', 0)
                 
-                if strike is not None and ask is not None:
-                    prices[float(strike)] = ask
+                # Logic to name the brackets
+                label = "Unknown"
+                strike_ref = 0.0
+                
+                if floor is None and cap is not None:
+                    # e.g. "76 or below"
+                    label = f"{cap} or below"
+                    strike_ref = float(cap) # Use cap as ref for sorting
+                elif floor is not None and cap is None:
+                    # e.g. "85 or above"
+                    label = f"{floor} or above"
+                    strike_ref = float(floor)
+                elif floor is not None and cap is not None:
+                    # e.g. "81 to 82" (Kalshi usually does ranges like this)
+                    # Note: Kalshi cap is often exclusive or inclusive depending on contract.
+                    # Usually "81 to 82" means 81 <= T <= 82.
+                    # We will just use the floor for the ID.
+                    label = f"{floor} to {cap}"
+                    strike_ref = float(floor)
+                
+                if strike_ref > 0:
+                    markets_list.append({
+                        "label": label,
+                        "strike": strike_ref,
+                        "price": ask
+                    })
                     
+            # Sort by strike temperature
+            markets_list.sort(key=lambda x: x['strike'])
+            
     except: pass
-    return prices
+    return markets_list
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v43_fix, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v44_dynamic, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -291,7 +318,7 @@ def fetch_forecast_data():
                 for p in periods:
                     data["all_hourly"].append(p)
                     if tomorrow_str in p['startTime']: data["tomorrow_hourly"].append(p)
-                    if today_str in p['startTime'] and p['isDaytime']: data["today_hourly"].append(p)
+                    if today_str in p['startTime']: data["today_hourly"].append(p)
         
         r_t = requests.get(AWC_TAF_URL, timeout=5)
         if r_t.status_code == 200: data["taf"] = r_t.text
@@ -539,7 +566,7 @@ def main():
     else:
         if "auto" in st.query_params: del st.query_params["auto"]
 
-    # 2. BRACKET SELECTOR (STICKY)
+    # 2. BRACKET SELECTOR (DYNAMIC)
     st.sidebar.subheader("🎯 Select Bracket (Live)")
     
     # Defaults
@@ -553,37 +580,45 @@ def main():
         st.query_params["target"] = str(val)
         if price is not None:
             st.query_params["price"] = str(price)
-            # MAGIC FIX: Force the session state to update immediately
             st.session_state["price_slider"] = int(price)
             
-    # Fetch Prices
-    prices = fetch_market_prices()
+    # Fetch Dynamic Markets
+    markets = fetch_market_data()
     
-    # Button Labels (With Price)
-    def lbl(base, txt):
-        p = prices.get(base)
-        if p: return f"{txt} ({p}¢)"
-        return txt
+    # Fallback to defaults if API fails
+    if not markets:
+        markets = [
+            {'label': '76 or below', 'strike': 76.0, 'price': 0},
+            {'label': '77 to 78', 'strike': 77.0, 'price': 0},
+            {'label': '79 to 80', 'strike': 79.0, 'price': 0},
+            {'label': '81 to 82', 'strike': 81.0, 'price': 0},
+            {'label': '83 to 84', 'strike': 83.0, 'price': 0},
+            {'label': '85 or above', 'strike': 85.0, 'price': 0}
+        ]
 
-    if st.sidebar.button(lbl(76.0, "76° or below"), use_container_width=True, type="primary" if default_target==76.0 else "secondary"): set_target(76.0, prices.get(76.0)); st.rerun()
-    
-    c1, c2 = st.sidebar.columns(2)
-    if c1.button(lbl(77.0, "77° - 78°"), use_container_width=True, type="primary" if default_target==77.0 else "secondary"): set_target(77.0, prices.get(77.0)); st.rerun()
-    if c2.button(lbl(79.0, "79° - 80°"), use_container_width=True, type="primary" if default_target==79.0 else "secondary"): set_target(79.0, prices.get(79.0)); st.rerun()
-    
-    c3, c4 = st.sidebar.columns(2)
-    if c3.button(lbl(81.0, "81° - 82°"), use_container_width=True, type="primary" if default_target==81.0 else "secondary"): set_target(81.0, prices.get(81.0)); st.rerun()
-    if c4.button(lbl(83.0, "83° - 84°"), use_container_width=True, type="primary" if default_target==83.0 else "secondary"): set_target(83.0, prices.get(83.0)); st.rerun()
-    
-    if st.sidebar.button(lbl(85.0, "85° or above"), use_container_width=True, type="primary" if default_target==85.0 else "secondary"): set_target(85.0, prices.get(85.0)); st.rerun()
+    # Render Buttons
+    for m in markets:
+        label = f"{m['label']} ({m['price']}¢)" if m['price'] > 0 else m['label']
+        is_active = (default_target == m['strike'])
+        if st.sidebar.button(label, use_container_width=True, type="primary" if is_active else "secondary"):
+            set_target(m['strike'], m['price'])
+            st.rerun()
 
-    # Map target to label
-    bracket_map = {76.0: "76 or below", 77.0: "77-78", 79.0: "79-80", 81.0: "81-82", 83.0: "83-84", 85.0: "85+"}
-    current_label = bracket_map.get(default_target, str(default_target))
+    # Find current label
+    current_label = f"{default_target}"
+    for m in markets:
+        if m['strike'] == default_target:
+            current_label = m['label']
+            break
 
     # 3. MARKET PRICE (STICKY)
     st.sidebar.divider()
     st.sidebar.markdown(f"**📉 Price for [{current_label}]**")
+    
+    # Show Overview Table
+    with st.sidebar.expander("📊 Market Overview"):
+        st.dataframe(pd.DataFrame(markets)[['label', 'price']], hide_index=True)
+
     default_price = 50
     if "price" in st.query_params:
         try: default_price = int(st.query_params["price"])
