@@ -20,7 +20,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v17_solarfix, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v29_labels, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
@@ -204,37 +204,41 @@ def render_live_dashboard():
     high_round = int(round(high_mark['Temp']))
     smart_trend = calculate_smart_trend(history)
 
-    # --- SOLAR FUEL (FIXED LOGIC) ---
+    # --- TIME & LOGIC ---
     now_miami = get_miami_time()
-    
-    # Define Sunrise (7:00 AM) and Sunset (5:55 PM)
     sunrise_miami = now_miami.replace(hour=7, minute=0, second=0, microsecond=0)
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
     
     is_night = False
     solar_fuel = "NIGHT"
     
-    # If it's before 7 AM OR after 5:55 PM, it's NIGHT
     if now_miami < sunrise_miami or now_miami > sunset_miami:
         is_night = True
     else:
-        # It's Day: Calculate remaining sunlight
         time_left = sunset_miami - now_miami
         hrs, rem = divmod(time_left.seconds, 3600)
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
 
+    # --- SMART LABELS ---
+    # If Pre-Dawn (Midnight to 8 AM), call it "24h High" instead of "Day High"
+    # to avoid confusion with the "New Day" that hasn't heated up yet.
+    high_label = "Day High"
+    if now_miami.hour < 8:
+        high_label = "24h High"
+
+    # --- METRICS GRID ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
     with col2:
         st.metric("Official Round", f"{latest['Official']}°F")
     with col3:
-        st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
+        st.metric(high_label, f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
     with col4:
         st.metric("Solar Fuel", solar_fuel)
 
-    # --- PROJECTION BOARD ---
+    # --- PROJECTION BOARD (Fixed for Night Stability) ---
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -248,13 +252,21 @@ def render_live_dashboard():
     else:
         proj_vals = []
         curr_temp = latest['Temp']
+        
+        # Trend Clamp: If night, don't project steep drops > -0.5
+        safe_trend = smart_trend
+        if is_night and safe_trend < -0.5: safe_trend = -0.5
+        
         for i, f in enumerate(next_3_hours):
             nws_temp = f['temperature']
-            trend_weight = 0.6 / (i + 1)
+            trend_weight = 0.4 / (i + 1)
             model_weight = 1.0 - trend_weight
-            raw_proj = (curr_temp + (smart_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
+            
+            raw_proj = (curr_temp + (safe_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
+            
             if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
-            if is_night: raw_proj -= (0.5 * (i+1))
+            if is_night: raw_proj -= (0.3 * (i+1))
+            
             icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
             if "Sunny" in f['shortForecast']: icon = "☀️"
             proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
