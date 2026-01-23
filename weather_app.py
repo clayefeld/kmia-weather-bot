@@ -459,4 +459,10 @@ def main():
         tomorrow_lbl = (now_miami + timedelta(days=1)).strftime("%A, %b %d")
         render_forecast_generic(
             f_data['tomorrow_daily'], 
-            f_data['tomorrow_hourly'],
+            f_data['tomorrow_hourly'], 
+            f_data['taf'], 
+            tomorrow_lbl
+        )
+
+if __name__ == "__main__":
+    main()
