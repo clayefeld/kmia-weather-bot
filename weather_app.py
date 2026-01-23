@@ -1,12 +1,23 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
+import json
+import base64
+import time
 import pandas as pd
 from datetime import datetime, timedelta, timezone 
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
+
+# --- LIBRARY CHECK ---
+try:
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Project Helios", page_icon="☀️", layout="wide")
@@ -16,9 +27,9 @@ NWS_API_HISTORY = "https://api.weather.gov/stations/KMIA/observations"
 AWC_METAR_URL = "https://aviationweather.gov/api/data/metar?ids=KMIA&format=raw&hours=12"
 NWS_POINT_URL = "https://api.weather.gov/points/25.7906,-80.3164"
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
+KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 # --- GLOBAL STYLES ---
-# Adds a little spacing to the buttons
 HIDE_INDEX_CSS = """
     <style>
     thead tr th:first-child {display:none}
@@ -27,9 +38,75 @@ HIDE_INDEX_CSS = """
     </style>
     """
 
+# --- KALSHI CLIENT (SECURE) ---
+class KalshiAuth:
+    def __init__(self):
+        try:
+            self.key_id = st.secrets["KALSHI_KEY_ID"]
+            self.private_key_str = st.secrets["KALSHI_PRIVATE_KEY"].replace("\\n", "\n")
+            self.private_key = serialization.load_pem_private_key(
+                self.private_key_str.encode(),
+                password=None
+            )
+            self.ready = True
+        except:
+            self.ready = False
+
+    def sign_request(self, method, path, timestamp):
+        if not self.ready: return None
+        msg = f"{timestamp}{method}{path}".encode('utf-8')
+        signature = self.private_key.sign(
+            msg,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+            hashes.SHA256()
+        )
+        return base64.b64encode(signature).decode('utf-8')
+
+# --- PRICE FETCHER ---
+@st.cache_data(ttl=60) # Cache prices for 60s to avoid spamming API
+def fetch_market_prices():
+    """
+    Returns a dict of {strike_price: yes_ask_price} for today's Miami High.
+    """
+    prices = {}
+    if not CRYPTO_AVAILABLE: return prices
+    
+    auth = KalshiAuth()
+    if not auth.ready: return prices
+
+    try:
+        now_miami = datetime.now(ZoneInfo("US/Eastern"))
+        date_str = now_miami.strftime("%y%b%d").upper() # 26JAN23
+        event_ticker = f"KXHIGHMIA-{date_str}"
+        
+        path = f"/events/{event_ticker}"
+        ts = str(int(time.time() * 1000))
+        sig = auth.sign_request("GET", path, ts)
+        
+        headers = {
+            "KALSHI-ACCESS-KEY": auth.key_id,
+            "KALSHI-ACCESS-SIGNATURE": sig,
+            "KALSHI-ACCESS-TIMESTAMP": ts,
+            "Content-Type": "application/json"
+        }
+        
+        r = requests.get(KALSHI_API_URL + path, headers=headers, timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            for m in data.get('markets', []):
+                strike = m.get('floor_strike')
+                ask = m.get('yes_ask')
+                # Handle "76 or below" which might have a different floor structure
+                # Sometimes it's just the lowest bracket found.
+                if strike is not None and ask is not None:
+                    prices[float(strike)] = ask
+                    
+    except: pass
+    return prices
+
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v41_brackets, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v42_livebuttons, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -65,9 +142,9 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky):
         confidence = 40
         
     if hum > 85:
-        reasons.append("Atmosphere Saturated (Hard to heat)")
+        reasons.append("Atmosphere Saturated")
         if trend > 1.0: 
-            reasons.append("⚠️ RALLY SUSPECT (High Humidity Divergence)")
+            reasons.append("⚠️ RALLY SUSPECT (Divergence)")
             sentiment = "TRAP"
             confidence = 15
     elif hum < 50:
@@ -87,7 +164,7 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky):
         confidence -= 10
     elif "CLR" in sky or "FEW" in sky:
         if solar_min > 120:
-            reasons.append("Clear Skies + Sun (Heating)")
+            reasons.append("Clear Skies (Heating)")
             if sentiment == "NEUTRAL": 
                 sentiment = "BULLISH"
                 confidence = 85
@@ -349,17 +426,6 @@ def render_live_dashboard(target_temp, bracket_label, manual_price):
 
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
 
-    # TARGET STATUS CHECK
-    status_msg = "❄️ COLD"
-    if target_temp - 0.5 <= latest['Temp'] < target_temp:
-        status_msg = f"⚠️ TRAP ZONE (Within 0.5° of {target_temp})"
-        st.warning(f"**BRACKET STATUS ({bracket_label}):** {status_msg}")
-    elif latest['Temp'] >= target_temp:
-        status_msg = f"✅ TARGET SECURED (Above {target_temp})"
-        st.success(f"**BRACKET STATUS ({bracket_label}):** {status_msg}")
-    else:
-        st.caption(f"**BRACKET STATUS ({bracket_label}):** {status_msg} (Gap: {target_temp - latest['Temp']:.2f}°F)")
-
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
@@ -464,31 +530,43 @@ def main():
         if "auto" in st.query_params: del st.query_params["auto"]
 
     # 2. BRACKET SELECTOR (STICKY)
-    st.sidebar.subheader("🎯 Select Bracket")
+    st.sidebar.subheader("🎯 Select Bracket (Live)")
     
     # Defaults
     default_target = 81.0
     if "target" in st.query_params:
         try: default_target = float(st.query_params["target"])
         except: pass
-        
-    # Helper to set params
-    def set_target(val):
+    
+    # Helper
+    def set_target(val, price):
         st.query_params["target"] = str(val)
-        
-    # Layout Buttons
+        if price is not None:
+            st.query_params["price"] = str(price)
+            
+    # Fetch Prices
+    prices = fetch_market_prices()
+    
+    # Button Labels (With Price)
+    def lbl(base, txt):
+        p = prices.get(base)
+        if p: return f"{txt} ({p}¢)"
+        return txt
+
+    if st.sidebar.button(lbl(76.0, "76° or below"), use_container_width=True, type="primary" if default_target==76.0 else "secondary"): set_target(76.0, prices.get(76.0)); st.rerun()
+    
     c1, c2 = st.sidebar.columns(2)
-    if c1.button("77° - 78°", use_container_width=True, type="primary" if default_target==77.0 else "secondary"): set_target(77.0); st.rerun()
-    if c2.button("79° - 80°", use_container_width=True, type="primary" if default_target==79.0 else "secondary"): set_target(79.0); st.rerun()
+    if c1.button(lbl(77.0, "77° - 78°"), use_container_width=True, type="primary" if default_target==77.0 else "secondary"): set_target(77.0, prices.get(77.0)); st.rerun()
+    if c2.button(lbl(79.0, "79° - 80°"), use_container_width=True, type="primary" if default_target==79.0 else "secondary"): set_target(79.0, prices.get(79.0)); st.rerun()
     
     c3, c4 = st.sidebar.columns(2)
-    if c3.button("81° - 82°", use_container_width=True, type="primary" if default_target==81.0 else "secondary"): set_target(81.0); st.rerun()
-    if c4.button("83° - 84°", use_container_width=True, type="primary" if default_target==83.0 else "secondary"): set_target(83.0); st.rerun()
+    if c3.button(lbl(81.0, "81° - 82°"), use_container_width=True, type="primary" if default_target==81.0 else "secondary"): set_target(81.0, prices.get(81.0)); st.rerun()
+    if c4.button(lbl(83.0, "83° - 84°"), use_container_width=True, type="primary" if default_target==83.0 else "secondary"): set_target(83.0, prices.get(83.0)); st.rerun()
     
-    if st.sidebar.button("85° or above", use_container_width=True, type="primary" if default_target==85.0 else "secondary"): set_target(85.0); st.rerun()
+    if st.sidebar.button(lbl(85.0, "85° or above"), use_container_width=True, type="primary" if default_target==85.0 else "secondary"): set_target(85.0, prices.get(85.0)); st.rerun()
 
     # Map target to label
-    bracket_map = {77.0: "77-78", 79.0: "79-80", 81.0: "81-82", 83.0: "83-84", 85.0: "85+"}
+    bracket_map = {76.0: "76 or below", 77.0: "77-78", 79.0: "79-80", 81.0: "81-82", 83.0: "83-84", 85.0: "85+"}
     current_label = bracket_map.get(default_target, str(default_target))
 
     # 3. MARKET PRICE (STICKY)
