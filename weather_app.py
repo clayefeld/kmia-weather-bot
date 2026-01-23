@@ -20,10 +20,9 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v29_labels, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v30_ai_hybrid, myemail@example.com)'}
 
 def get_miami_time():
-    """Returns the current time explicitly in US/Eastern (Miami Time)"""
     try:
         return datetime.now(ZoneInfo("US/Eastern"))
     except:
@@ -202,9 +201,16 @@ def render_live_dashboard():
     latest = history[0]
     high_mark = max(history, key=lambda x: x['Temp'])
     high_round = int(round(high_mark['Temp']))
-    smart_trend = calculate_smart_trend(history)
+    
+    # --- AI AGENT: PHYSICS ENGINE ---
+    raw_trend = calculate_smart_trend(history)
+    
+    # 1. Volatility Dampener (Clamp to ±1.5)
+    safe_trend = raw_trend
+    if safe_trend > 1.5: safe_trend = 1.5
+    if safe_trend < -1.5: safe_trend = -1.5
 
-    # --- TIME & LOGIC ---
+    # --- TIME LOGIC ---
     now_miami = get_miami_time()
     sunrise_miami = now_miami.replace(hour=7, minute=0, second=0, microsecond=0)
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
@@ -214,23 +220,22 @@ def render_live_dashboard():
     
     if now_miami < sunrise_miami or now_miami > sunset_miami:
         is_night = True
+        # 2. Night Safety Clamp (Prevent panic drops)
+        if safe_trend < -0.5: safe_trend = -0.5 
     else:
         time_left = sunset_miami - now_miami
         hrs, rem = divmod(time_left.seconds, 3600)
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
 
-    # --- SMART LABELS ---
-    # If Pre-Dawn (Midnight to 8 AM), call it "24h High" instead of "Day High"
-    # to avoid confusion with the "New Day" that hasn't heated up yet.
+    # Smart High Label
     high_label = "Day High"
-    if now_miami.hour < 8:
-        high_label = "24h High"
+    if now_miami.hour < 8: high_label = "24h High"
 
-    # --- METRICS GRID ---
+    # --- METRICS ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
+        st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{raw_trend:+.2f}/hr")
     with col2:
         st.metric("Official Round", f"{latest['Official']}°F")
     with col3:
@@ -238,7 +243,7 @@ def render_live_dashboard():
     with col4:
         st.metric("Solar Fuel", solar_fuel)
 
-    # --- PROJECTION BOARD (Fixed for Night Stability) ---
+    # --- AI PROJECTION BOARD ---
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -252,16 +257,16 @@ def render_live_dashboard():
     else:
         proj_vals = []
         curr_temp = latest['Temp']
-        
-        # Trend Clamp: If night, don't project steep drops > -0.5
-        safe_trend = smart_trend
-        if is_night and safe_trend < -0.5: safe_trend = -0.5
-        
         for i, f in enumerate(next_3_hours):
             nws_temp = f['temperature']
+            
+            # 3. Weighted Stability (40% Trend / 60% Forecast)
+            # This makes the projection "trust" the NWS forecast more than the live sensor
+            # which smoothens out short-term sensor noise.
             trend_weight = 0.4 / (i + 1)
             model_weight = 1.0 - trend_weight
             
+            # Using SAFE_TREND (Dampened) instead of raw trend
             raw_proj = (curr_temp + (safe_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
             
             if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1))
@@ -273,13 +278,13 @@ def render_live_dashboard():
         proj_str = " | ".join(proj_vals)
 
     trend_icon = "➡️"
-    if smart_trend > 0.5: trend_icon = "🔥 Rising Fast"
-    elif smart_trend > 0.1: trend_icon = "↗️ Rising"
-    elif smart_trend < -0.5: trend_icon = "❄️ Dropping Fast"
-    elif smart_trend < -0.1: trend_icon = "↘️ Falling"
+    if raw_trend > 0.5: trend_icon = "🔥 Rising Fast"
+    elif raw_trend > 0.1: trend_icon = "↗️ Rising"
+    elif raw_trend < -0.5: trend_icon = "❄️ Dropping Fast"
+    elif raw_trend < -0.1: trend_icon = "↘️ Falling"
     else: trend_icon = "➡️ Flat"
 
-    st.success(f"**📈 TREND:** {trend_icon} ({smart_trend:+.2f}°F/hr) \n\n **🔮 PROJECTION:** {proj_str}")
+    st.success(f"**📈 TREND:** {trend_icon} ({raw_trend:+.2f}°F/hr) \n\n **🔮 AI PROJECTION:** {proj_str}")
 
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
@@ -454,10 +459,4 @@ def main():
         tomorrow_lbl = (now_miami + timedelta(days=1)).strftime("%A, %b %d")
         render_forecast_generic(
             f_data['tomorrow_daily'], 
-            f_data['tomorrow_hourly'], 
-            f_data['taf'], 
-            tomorrow_lbl
-        )
-
-if __name__ == "__main__":
-    main()
+            f_data['tomorrow_hourly'],
