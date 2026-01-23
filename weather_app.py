@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="KMIA Weather Bot", page_icon="📡", layout="wide")
+st.set_page_config(page_title="KMIA Command", page_icon="📡", layout="wide")
 
 # URLs
 NWS_API_HISTORY = "https://api.weather.gov/stations/KMIA/observations"
@@ -16,7 +16,7 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(myweatherbot_clean_v4, myemail@example.com)'}
+    return {'User-Agent': '(myweatherbot_v5_pro, myemail@example.com)'}
 
 def parse_iso_time(iso_str):
     try:
@@ -166,6 +166,9 @@ def render_live_dashboard():
 
     latest = history[0]
     high_mark = max(history, key=lambda x: x['Temp'])
+    # NEW: Calculate rounded high
+    high_round = int(round(high_mark['Temp']))
+    
     smart_trend = calculate_smart_trend(history)
 
     # Solar Calc
@@ -181,11 +184,12 @@ def render_live_dashboard():
     # --- BIG METRICS ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Current Temp", f"{latest['Temp']:.1f}°F", f"{smart_trend:+.1f}/hr")
+        st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
     with col2:
         st.metric("Official Round", f"{latest['Official']}°F")
     with col3:
-        st.metric("Day High", f"{high_mark['Temp']:.1f}°F")
+        # UPDATED: Shows "75.92°F ➡ 76°F"
+        st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
     with col4:
         st.metric("Solar Fuel", solar_fuel)
 
@@ -222,16 +226,10 @@ def render_live_dashboard():
         })
         
     df = pd.DataFrame(clean_rows)
-    
-    # Configure the table to be SUPER readable
     st.dataframe(
         df,
         column_config={
-            "Temp": st.column_config.NumberColumn(
-                "Temp (°F)",
-                format="%.1f",
-                step=0.1,
-            ),
+            "Temp": st.column_config.NumberColumn("Temp (°F)", format="%.2f", step=0.1),
             "Trend": st.column_config.TextColumn("Velocity"),
             "Src": st.column_config.TextColumn("Source", width="small"),
         },
@@ -241,7 +239,9 @@ def render_live_dashboard():
 
 # --- VIEW: FORECAST ---
 def render_forecast_dashboard():
-    st.title("📅 Tomorrow's Plan")
+    # UPDATED: Dynamic Date Header
+    target_date = (datetime.now() + timedelta(days=1)).strftime("%A, %b %d")
+    st.title(f"📅 Forecast for {target_date}")
     
     if st.button("🔄 Refresh Forecast"):
         st.cache_data.clear()
@@ -256,16 +256,13 @@ def render_forecast_dashboard():
     # --- CORRECTED SCORE LOGIC ---
     score = 10
     rain_hours = 0
-    
     for h in hourly:
         s = h['shortForecast'].lower()
         if "rain" in s or "shower" in s: rain_hours += 1
         if "thunder" in s: rain_hours += 2 
     
-    # Apply penalties based on THRESHOLDS (not per hour)
-    if rain_hours > 0: score -= 2        # Penalty for rain appearing
-    if rain_hours > 4: score -= 2        # Extra penalty if it lingers (>4 hours)
-    
+    if rain_hours > 0: score -= 2        
+    if rain_hours > 4: score -= 2        
     score = max(1, min(10, score))
     
     # --- TOP SECTION ---
@@ -275,24 +272,21 @@ def render_forecast_dashboard():
         st.progress(score/10)
     with c2:
         if daily:
-            st.success(f"**Analyst Note:** {daily['shortForecast']}")
+            # UPDATED: Using 'detailedForecast' for full analyst note
+            st.success(f"**Analyst Note:** {daily['detailedForecast']}")
             st.caption(f"Winds: {daily['windSpeed']} • High: {daily['temperature']}°F")
 
     # --- HOURLY TABLE ---
     st.subheader("Hourly Risk Breakdown")
-    
     h_data = []
     for h in hourly:
         dt = parse_iso_time(h['startTime'])
         short = h['shortForecast']
-        
-        # Simple Icons
         icon = "☁️"
         if "Sunny" in short: icon = "☀️"
         if "Rain" in short: icon = "🌧️"
         if "Thunder" in short: icon = "⛈️"
         
-        # Risk Flag
         risk_level = "Safe"
         if "Rain" in short or "Thunder" in short: risk_level = "⚠️ RISK"
 
@@ -305,7 +299,6 @@ def render_forecast_dashboard():
         })
 
     df_h = pd.DataFrame(h_data)
-    
     st.dataframe(
         df_h,
         column_config={
@@ -323,10 +316,8 @@ def render_forecast_dashboard():
 
 # --- MAIN APP ---
 def main():
-    # SIDEBAR NAVIGATION
     st.sidebar.header("Navigation")
     view_mode = st.sidebar.radio("Select View:", ["Live Monitor", "Tomorrow's Forecast"])
-    
     st.sidebar.divider()
     st.sidebar.caption(f"Last Load: {datetime.now().strftime('%H:%M:%S')}")
 
