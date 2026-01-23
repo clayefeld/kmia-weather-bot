@@ -18,9 +18,17 @@ AWC_METAR_URL = "https://aviationweather.gov/api/data/metar?ids=KMIA&format=raw&
 NWS_POINT_URL = "https://api.weather.gov/points/25.7906,-80.3164"
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
+# --- GLOBAL STYLES (Restored) ---
+HIDE_INDEX_CSS = """
+    <style>
+    thead tr th:first-child {display:none}
+    tbody th {display:none}
+    </style>
+    """
+
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v31_ai_agent, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v32_css_fix, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -161,7 +169,7 @@ def fetch_live_history():
                         "Wind": w_str,
                         "Sky": sky,
                         "WindVal": w_val,
-                        "Hum": 0, # METAR raw rarely has easy humidity parsing without math
+                        "Hum": 0, 
                         "Dew": 0
                     })
     except Exception as e:
@@ -379,13 +387,7 @@ def render_live_dashboard(target_temp, show_target):
     df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
     df = df.rename(columns={"Temp": "Temp (°F)", "Official": "Official (Rnd)"})
     
-    hide_table_row_index = """
-        <style>
-        thead tr th:first-child {display:none}
-        tbody th {display:none}
-        </style>
-        """
-    st.markdown(hide_table_row_index, unsafe_allow_html=True)
+    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     st.table(df)
 
 # --- VIEW: FORECAST RENDERER ---
