@@ -1,7 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
-import re
 import pandas as pd
 from datetime import datetime, timedelta, timezone 
 try:
@@ -28,7 +27,7 @@ HIDE_INDEX_CSS = """
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v38_hybrid, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v39_sticky, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -49,13 +48,12 @@ def get_display_time(dt_utc):
         dt_miami = dt_utc.astimezone(timezone(timedelta(hours=-5)))
     return dt_miami.strftime("%I:%M %p")
 
-# --- AI AGENT LOGIC (THE BRAIN) ---
+# --- AI AGENT LOGIC ---
 def get_agent_analysis(trend, hum, wind_dir, solar_min, sky):
     reasons = []
     sentiment = "NEUTRAL"
-    confidence = 50 # Base probability (Coin flip)
+    confidence = 50 
     
-    # 1. Solar Analysis
     if solar_min <= 0:
         reasons.append("Night mode (No solar fuel)")
         sentiment = "BEARISH"
@@ -64,18 +62,16 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky):
         reasons.append("Low solar angle (<2h left)")
         confidence = 40
         
-    # 2. Moisture Analysis (Humidity)
     if hum > 85:
         reasons.append("Atmosphere Saturated (Hard to heat)")
         if trend > 1.0: 
             reasons.append("⚠️ RALLY SUSPECT (High Humidity Divergence)")
             sentiment = "TRAP"
-            confidence = 15 # High confidence it will fail
+            confidence = 15
     elif hum < 50:
         reasons.append("Dry Air (Easy heating)")
         confidence += 10
     
-    # 3. Wind Analysis (Ocean Breeze)
     if 0 <= wind_dir <= 180:
         reasons.append("Ocean Breeze (Cooling Effect)")
         if sentiment == "NEUTRAL": confidence = 30
@@ -83,7 +79,6 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky):
         reasons.append("Land Breeze (Warming)")
         if sentiment == "NEUTRAL": confidence = 60
         
-    # 4. Sky Condition
     if "OVC" in sky or "BKN" in sky:
         reasons.append("Clouds blocking sun")
         if sentiment != "TRAP": sentiment = "BEARISH"
@@ -95,9 +90,7 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky):
                 sentiment = "BULLISH"
                 confidence = 85
 
-    # Clamp Confidence
     confidence = max(1, min(99, confidence))
-
     if not reasons: reasons.append("Conditions nominal.")
     summary = " + ".join(reasons)
     return sentiment, summary, confidence
@@ -114,7 +107,6 @@ def fetch_live_history():
                 temp_c = props.get('temperature', {}).get('value')
                 if temp_c is None: continue
                 
-                # Fetch Humidity & Dewpoint for AI
                 dew_c = props.get('dewpoint', {}).get('value')
                 dew_f = (dew_c * 1.8) + 32 if dew_c is not None else 0.0
                 rel_hum = props.get('relativeHumidity', {}).get('value')
@@ -228,7 +220,6 @@ def fetch_forecast_data():
     except: pass
     return data
 
-# --- MATH ---
 def calculate_smart_trend(master_list):
     if len(master_list) < 2: return 0.0
     now = master_list[0]['dt_utc']
@@ -256,9 +247,6 @@ def render_live_dashboard(target_temp, show_target, manual_price):
     history, err = fetch_live_history()
     f_data = fetch_forecast_data()
     
-    # ⚠️ SAFETY
-    clean_rows = []
-    
     if not history:
         st.error("Connection Failed: No Data Available")
         return
@@ -268,7 +256,6 @@ def render_live_dashboard(target_temp, show_target, manual_price):
     high_round = int(round(high_mark['Temp']))
     smart_trend = calculate_smart_trend(history)
 
-    # --- TIME & SOLAR LOGIC ---
     now_miami = get_miami_time()
     sunrise_miami = now_miami.replace(hour=7, minute=0, second=0, microsecond=0)
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
@@ -286,11 +273,9 @@ def render_live_dashboard(target_temp, show_target, manual_price):
         mins = rem // 60
         solar_fuel = f"{hrs}h {mins}m"
 
-    # --- DAMPENER (Physics) ---
     safe_trend = smart_trend
     if is_night and safe_trend < -0.5: safe_trend = -0.5
     
-    # --- AI AGENT EXECUTION ---
     hum = latest.get('Hum', 0)
     wind_dir = latest.get('WindVal', -1)
     if wind_dir == -1:
@@ -311,32 +296,26 @@ def render_live_dashboard(target_temp, show_target, manual_price):
     with c4: st.metric("Solar Fuel", solar_fuel)
 
     # --- AI ANALYSIS & ARB CALCULATOR ---
-    # This matches the "AI Agent" layout you liked in the other script
     st.markdown("---")
     m_col1, m_col2 = st.columns([2, 1])
     
     with m_col1:
-        # The Brain
         sentiment_color = "blue"
         if ai_sent == "BULLISH": sentiment_color = "green"
         if ai_sent == "BEARISH": sentiment_color = "red"
         if ai_sent == "TRAP": sentiment_color = "orange"
-        
         st.info(f"🤖 **PHYSICS ENGINE:** :{sentiment_color}[**{ai_sent}**] ({ai_conf}% Conf)\n\n{ai_reason}")
 
     with m_col2:
-        # The Calculator
         edge = ai_conf - manual_price
         edge_label = "Fair Value"
         edge_color = "off"
-        
         if edge > 15: 
-            edge_color = "normal" # Green
+            edge_color = "normal"
             edge_label = "🔥 BUY Signal"
         elif edge < -15: 
-            edge_color = "inverse" # Red
+            edge_color = "inverse"
             edge_label = "🛑 OVERPRICED"
-            
         st.metric(f"Market (Manual Input)", f"{manual_price}¢", f"{edge:+.0f}% Edge ({edge_label})", delta_color=edge_color)
 
     # --- PROJECTION BOARD ---
@@ -367,8 +346,8 @@ def render_live_dashboard(target_temp, show_target, manual_price):
 
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
 
-    # --- SENSOR TABLE ---
     st.subheader("Sensor Log (Miami Time)")
+    clean_rows = []
     for i, row in enumerate(history[:15]):
         vel_str = "—"
         if i < len(history) - 1:
@@ -453,15 +432,30 @@ def render_forecast_generic(daily, hourly, taf, date_label):
     st.table(df_h)
     if taf: st.divider(); st.caption("✈️ AVIATION TAF (PILOT DATA)"); st.code(taf, language="text")
 
-# --- MAIN APP ---
+# --- MAIN APP (STICKY PARAMS) ---
 def main():
     st.sidebar.header("PROJECT HELIOS ☀️")
     st.sidebar.caption("High-Frequency Weather Algo")
     view_mode = st.sidebar.radio("Command Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
     
-    auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=False)
-    if auto_refresh: components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 60000);</script>""", height=0)
+    # 1. READ PARAMS (STICKY STATE)
+    # If URL is .../?auto=true&price=80, we use those defaults.
+    
+    # Auto-Refresh Logic
+    default_auto = False
+    if "auto" in st.query_params and st.query_params["auto"] == "true":
+        default_auto = True
+        
+    auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=default_auto)
+    
+    # Update URL if checkbox changes
+    if auto_refresh:
+        st.query_params["auto"] = "true"
+        # The JS Reloader
+        components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 60000);</script>""", height=0)
+    else:
+        if "auto" in st.query_params: del st.query_params["auto"]
 
     # DYNAMIC TARGET INPUT
     show_target = st.sidebar.checkbox("🎯 Active Target Line", value=True)
@@ -469,10 +463,21 @@ def main():
     if show_target:
         target_temp = st.sidebar.number_input("Strike Price", value=76.0, step=0.1, format="%.1f")
 
-    # KALSHI MARKET INPUT
+    # KALSHI MARKET INPUT (STICKY)
     st.sidebar.divider()
     st.sidebar.markdown("**📉 Market Sentiment**")
-    manual_price = st.sidebar.slider("Manual Price Override", 1, 99, 50)
+    
+    # Read persistent price from URL
+    default_price = 50
+    if "price" in st.query_params:
+        try: default_price = int(st.query_params["price"])
+        except: pass
+        
+    manual_price = st.sidebar.slider("Current Market Price (Yes)", 1, 99, default_price)
+    
+    # If slider moves, update URL immediately
+    if manual_price != default_price:
+        st.query_params["price"] = str(manual_price)
 
     now_miami = get_miami_time()
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
