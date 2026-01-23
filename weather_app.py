@@ -49,8 +49,9 @@ class KalshiAuth:
                 password=None
             )
             self.ready = True
-        except:
+        except Exception as e:
             self.ready = False
+            self.error = str(e)
 
     def sign_request(self, method, path, timestamp):
         if not self.ready: return None
@@ -62,24 +63,33 @@ class KalshiAuth:
         )
         return base64.b64encode(signature).decode('utf-8')
 
-# --- DYNAMIC MARKET FETCHER ---
+# --- SMART MARKET FETCHER ---
 @st.cache_data(ttl=60)
 def fetch_market_data():
     """
-    Returns a sorted list of dicts: [{'label': '81-82', 'strike': 81.0, 'price': 50}, ...]
+    Finds the active Miami High Temp event dynamically and returns bracket prices.
+    Returns: (markets_list, status_msg)
     """
-    markets_list = []
-    if not CRYPTO_AVAILABLE: return []
+    if not CRYPTO_AVAILABLE: return [], "🔴 Crypto Lib Missing"
     auth = KalshiAuth()
-    if not auth.ready: return []
+    if not auth.ready: return [], "🔴 Keys Missing"
 
     try:
+        # 1. Find the Event Ticker via Series Search (Robust)
+        # We search for events in the 'KXHIGHMIA' series
+        path = "/events"
+        ts = str(int(time.time() * 1000))
+        # We need to filter by series_ticker query param? 
+        # Kalshi V2 GET signing is tricky with params. 
+        # Safer strategy: Get markets by series_ticker directly if possible, or construct likely ticker.
+        
+        # Let's try the direct date construction again but handle errors gracefully
+        # Standard format is KXHIGHMIA-YYMMMDD e.g. 26JAN23
         now_miami = datetime.now(ZoneInfo("US/Eastern"))
-        date_str = now_miami.strftime("%y%b%d").upper() 
+        date_str = now_miami.strftime("%y%b%d").upper()
         event_ticker = f"KXHIGHMIA-{date_str}"
         
         path = f"/events/{event_ticker}"
-        ts = str(int(time.time() * 1000))
         sig = auth.sign_request("GET", path, ts)
         
         headers = {
@@ -90,49 +100,66 @@ def fetch_market_data():
         }
         
         r = requests.get(KALSHI_API_URL + path, headers=headers, timeout=3)
-        if r.status_code == 200:
-            data = r.json()
-            for m in data.get('markets', []):
-                floor = m.get('floor_strike')
-                cap = m.get('cap_strike')
-                ask = m.get('yes_ask', 0)
-                
-                # Logic to name the brackets
-                label = "Unknown"
-                strike_ref = 0.0
-                
-                if floor is None and cap is not None:
-                    # e.g. "76 or below"
-                    label = f"{cap} or below"
-                    strike_ref = float(cap) # Use cap as ref for sorting
-                elif floor is not None and cap is None:
-                    # e.g. "85 or above"
-                    label = f"{floor} or above"
-                    strike_ref = float(floor)
-                elif floor is not None and cap is not None:
-                    # e.g. "81 to 82" (Kalshi usually does ranges like this)
-                    # Note: Kalshi cap is often exclusive or inclusive depending on contract.
-                    # Usually "81 to 82" means 81 <= T <= 82.
-                    # We will just use the floor for the ID.
-                    label = f"{floor} to {cap}"
-                    strike_ref = float(floor)
-                
-                if strike_ref > 0:
-                    markets_list.append({
-                        "label": label,
-                        "strike": strike_ref,
-                        "price": ask
-                    })
-                    
-            # Sort by strike temperature
-            markets_list.sort(key=lambda x: x['strike'])
+        
+        # 2. Process Response
+        if r.status_code != 200:
+            return [], f"🔴 API {r.status_code} ({event_ticker})"
             
-    except: pass
-    return markets_list
+        data = r.json()
+        raw_markets = data.get('markets', [])
+        
+        parsed_markets = []
+        for m in raw_markets:
+            floor = m.get('floor_strike')
+            cap = m.get('cap_strike')
+            ask = m.get('yes_ask', 0)
+            
+            # Sort Key: Use floor if exists, else huge negative number
+            sort_key = floor if floor is not None else -999.0
+            
+            parsed_markets.append({
+                "floor": floor,
+                "cap": cap,
+                "price": ask,
+                "sort": sort_key
+            })
+            
+        # 3. Sort & Label
+        parsed_markets.sort(key=lambda x: x['sort'])
+        
+        final_list = []
+        count = len(parsed_markets)
+        for i, m in enumerate(parsed_markets):
+            label = "Unknown"
+            strike_val = m['floor'] if m['floor'] else m['cap']
+            
+            if i == 0:
+                # Lowest bracket
+                val = m['cap'] if m['cap'] else m['floor']
+                label = f"{val} or below"
+                strike_val = val # For the 'target' logic, use the number itself
+            elif i == count - 1:
+                # Highest bracket
+                val = m['floor'] if m['floor'] else m['cap']
+                label = f"{val} or above"
+            else:
+                # Middle brackets
+                label = f"{m['floor']} - {m['cap']}"
+            
+            final_list.append({
+                "label": label,
+                "strike": float(strike_val),
+                "price": m['price']
+            })
+            
+        return final_list, "🟢 Live Market"
+
+    except Exception as e:
+        return [], f"🔴 Error: {str(e)}"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v44_dynamic, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v45_autopilot, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -342,7 +369,7 @@ def calculate_smart_trend(master_list):
     return ((N*sum_xy - sum_x*sum_y) / den) * 60
 
 # --- VIEW: LIVE MONITOR ---
-def render_live_dashboard(target_temp, bracket_label, manual_price):
+def render_live_dashboard(target_temp, bracket_label, live_price):
     st.title("🔴 Project Helios: Live Feed")
     
     if st.button("🔄 Refresh System", type="primary"):
@@ -413,16 +440,19 @@ def render_live_dashboard(target_temp, bracket_label, manual_price):
         st.info(f"🤖 **PHYSICS ENGINE:** :{sentiment_color}[**{ai_sent}**] ({ai_conf}% Conf)\n\n{ai_reason}")
 
     with m_col2:
-        edge = ai_conf - manual_price
-        edge_label = "Fair Value"
-        edge_color = "off"
-        if edge > 15: 
-            edge_color = "normal"
-            edge_label = "🔥 BUY Signal"
-        elif edge < -15: 
-            edge_color = "inverse"
-            edge_label = "🛑 OVERPRICED"
-        st.metric(f"Market Price ({bracket_label})", f"{manual_price}¢", f"{edge:+.0f}% Edge ({edge_label})", delta_color=edge_color)
+        if live_price is not None:
+            edge = ai_conf - live_price
+            edge_label = "Fair Value"
+            edge_color = "off"
+            if edge > 15: 
+                edge_color = "normal"
+                edge_label = "🔥 BUY Signal"
+            elif edge < -15: 
+                edge_color = "inverse"
+                edge_label = "🛑 OVERPRICED"
+            st.metric(f"Kalshi Price ({bracket_label})", f"{live_price}¢", f"{edge:+.0f}% Edge ({edge_label})", delta_color=edge_color)
+        else:
+            st.metric(f"Kalshi Price ({bracket_label})", "--", "Data Unavailable")
 
     # --- PROJECTION BOARD ---
     next_3_hours = []
@@ -567,25 +597,10 @@ def main():
         if "auto" in st.query_params: del st.query_params["auto"]
 
     # 2. BRACKET SELECTOR (DYNAMIC)
-    st.sidebar.subheader("🎯 Select Bracket (Live)")
+    markets, m_status = fetch_market_data()
+    st.sidebar.subheader(f"🎯 Select Bracket ({m_status})")
     
-    # Defaults
-    default_target = 81.0
-    if "target" in st.query_params:
-        try: default_target = float(st.query_params["target"])
-        except: pass
-    
-    # Helper to set params & FORCE SLIDER UPDATE
-    def set_target(val, price):
-        st.query_params["target"] = str(val)
-        if price is not None:
-            st.query_params["price"] = str(price)
-            st.session_state["price_slider"] = int(price)
-            
-    # Fetch Dynamic Markets
-    markets = fetch_market_data()
-    
-    # Fallback to defaults if API fails
+    # Fallback Defaults
     if not markets:
         markets = [
             {'label': '76 or below', 'strike': 76.0, 'price': 0},
@@ -596,43 +611,37 @@ def main():
             {'label': '85 or above', 'strike': 85.0, 'price': 0}
         ]
 
+    # Persistent Selection
+    default_target = 81.0
+    if "target" in st.query_params:
+        try: default_target = float(st.query_params["target"])
+        except: pass
+        
+    def set_target(val):
+        st.query_params["target"] = str(val)
+
     # Render Buttons
     for m in markets:
         label = f"{m['label']} ({m['price']}¢)" if m['price'] > 0 else m['label']
         is_active = (default_target == m['strike'])
         if st.sidebar.button(label, use_container_width=True, type="primary" if is_active else "secondary"):
-            set_target(m['strike'], m['price'])
+            set_target(m['strike'])
             st.rerun()
 
-    # Find current label
+    # Get Current Price
     current_label = f"{default_target}"
+    current_price = None
     for m in markets:
         if m['strike'] == default_target:
             current_label = m['label']
+            if m['price'] > 0: current_price = m['price']
             break
-
-    # 3. MARKET PRICE (STICKY)
-    st.sidebar.divider()
-    st.sidebar.markdown(f"**📉 Price for [{current_label}]**")
-    
-    # Show Overview Table
-    with st.sidebar.expander("📊 Market Overview"):
-        st.dataframe(pd.DataFrame(markets)[['label', 'price']], hide_index=True)
-
-    default_price = 50
-    if "price" in st.query_params:
-        try: default_price = int(st.query_params["price"])
-        except: pass
-        
-    manual_price = st.sidebar.slider("Cents", 1, 99, default_price, key="price_slider")
-    if manual_price != default_price:
-        st.query_params["price"] = str(manual_price)
 
     now_miami = get_miami_time()
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
     f_data = fetch_forecast_data()
     
-    if view_mode == "Live Monitor": render_live_dashboard(default_target, current_label, manual_price)
+    if view_mode == "Live Monitor": render_live_dashboard(default_target, current_label, current_price)
     elif view_mode == "Today's Forecast": render_forecast_generic(f_data['today_daily'], f_data['today_hourly'], f_data['taf'], now_miami.strftime("%A, %b %d"))
     elif view_mode == "Tomorrow's Forecast": render_forecast_generic(f_data['tomorrow_daily'], f_data['tomorrow_hourly'], f_data['taf'], (now_miami + timedelta(days=1)).strftime("%A, %b %d"))
 
