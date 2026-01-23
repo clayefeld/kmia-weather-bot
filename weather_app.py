@@ -42,12 +42,9 @@ HIDE_INDEX_CSS = """
 # --- KALSHI CLIENT (SECURE AUTH) ---
 class KalshiAuth:
     def __init__(self):
-        # SECURE FETCH: Look for keys in Streamlit Secrets
         try:
             self.key_id = st.secrets["KALSHI_KEY_ID"]
-            # Convert string newline characters back to real newlines if needed
             self.private_key_str = st.secrets["KALSHI_PRIVATE_KEY"].replace("\\n", "\n")
-            
             self.private_key = serialization.load_pem_private_key(
                 self.private_key_str.encode(),
                 password=None
@@ -70,25 +67,22 @@ class KalshiAuth:
         )
         return base64.b64encode(signature).decode('utf-8')
 
-def fetch_kalshi_market(target_strike):
+def fetch_all_kalshi_markets():
     """
-    Fetches the specific contract for today's High Temp that matches the target_strike.
+    Fetches ALL contracts for today's High Temp event.
+    Returns: DataFrame of [Strike, Price, Ticker]
     """
-    if not CRYPTO_AVAILABLE:
-        return 0, "Crypto Lib Missing", "Install 'cryptography'"
-        
+    if not CRYPTO_AVAILABLE: return None, "Crypto Lib Missing"
     auth = KalshiAuth()
-    if not auth.ready:
-        return 0, "No Keys", "Add to .streamlit/secrets.toml"
+    if not auth.ready: return None, "No Keys Configured"
 
     try:
-        # 1. Generate Ticker Context
+        # 1. Context
         now_miami = datetime.now(ZoneInfo("US/Eastern"))
-        # Kalshi High Temp Event Ticker format: KXHIGHMIA-YYMMDD
         date_str = now_miami.strftime("%y%b%d").upper() # e.g. 26JAN23
         event_ticker = f"KXHIGHMIA-{date_str}"
         
-        # 2. Prepare Request
+        # 2. Request
         path = f"/events/{event_ticker}"
         ts = str(int(time.time() * 1000))
         sig = auth.sign_request("GET", path, ts)
@@ -100,36 +94,34 @@ def fetch_kalshi_market(target_strike):
             "Content-Type": "application/json"
         }
         
-        # 3. Execute
         r = requests.get(KALSHI_API_URL + path, headers=headers, timeout=3)
-        
-        if r.status_code != 200:
-            return 0, "API Error", f"Status: {r.status_code}"
+        if r.status_code != 200: return None, f"API Error: {r.status_code}"
             
         data = r.json()
         markets = data.get('markets', [])
         
-        # 4. Find Strike Match
-        best_market = None
+        # 3. Parse ALL Markets
+        clean_data = []
         for m in markets:
-            if m.get('floor_strike') == target_strike:
-                best_market = m
-                break
+            strike = m.get('floor_strike')
+            ask = m.get('yes_ask')
+            if strike:
+                price = ask if ask else 0 # 0 means no liquidity/sellers
+                clean_data.append({"Strike": strike, "Price": price, "Ticker": m.get('ticker')})
         
-        if not best_market:
-            return 0, "Strike Not Found", f"No {target_strike} market"
+        # Sort by Strike
+        df = pd.DataFrame(clean_data)
+        if not df.empty:
+            df = df.sort_values(by="Strike")
             
-        yes_ask = best_market.get('yes_ask')
-        if not yes_ask: return 0, "No Liquidity", "No Asks"
-        
-        return yes_ask, best_market.get('ticker'), None
+        return df, None
 
     except Exception as e:
-        return 0, "Error", str(e)
+        return None, str(e)
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v36_bulletproof, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v37_marketdepth, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -337,7 +329,7 @@ def calculate_smart_trend(master_list):
     return ((N*sum_xy - sum_x*sum_y) / den) * 60
 
 # --- VIEW: LIVE MONITOR ---
-def render_live_dashboard(target_temp, show_target, manual_price):
+def render_live_dashboard(target_temp, show_target):
     st.title("🔴 Project Helios: Live Feed")
     
     if st.button("🔄 Refresh System", type="primary"):
@@ -347,8 +339,8 @@ def render_live_dashboard(target_temp, show_target, manual_price):
     history, err = fetch_live_history()
     f_data = fetch_forecast_data()
     
-    # ⚠️ HOISTED VARIABLE: Guarantees clean_rows exists no matter what
-    clean_rows = [] 
+    # ⚠️ HOISTED: Guarantee existence
+    clean_rows = []
     
     if not history:
         st.error("Connection Failed: No Data Available")
@@ -392,19 +384,23 @@ def render_live_dashboard(target_temp, show_target, manual_price):
                 
     ai_sent, ai_reason, ai_conf = get_agent_analysis(safe_trend, hum, wind_dir, solar_min, latest['Sky'])
 
-    # --- FETCH KALSHI MARKET (SECURELY) ---
+    # --- FETCH FULL KALSHI MARKET ---
     kalshi_price = 0
-    kalshi_status = "Manual"
+    kalshi_status = "Waiting..."
     
-    # Try fetching via API first (if keys are in secrets)
-    k_price, k_ticker, k_err = fetch_kalshi_market(target_temp)
-    if k_price > 0:
-        kalshi_price = k_price
-        kalshi_status = f"API ({k_ticker})"
+    market_df, k_err = fetch_all_kalshi_markets()
+    
+    # Find price for target_temp
+    if market_df is not None and not market_df.empty:
+        kalshi_status = "Live"
+        # Filter df for our target strike
+        match = market_df[market_df['Strike'] == target_temp]
+        if not match.empty:
+            kalshi_price = float(match.iloc[0]['Price'])
+        else:
+            kalshi_status = f"No Strike {target_temp}"
     else:
-        # Fallback to manual
-        kalshi_price = manual_price
-        kalshi_status = f"Manual"
+        kalshi_status = f"API Error: {k_err}"
 
     # --- METRICS ---
     c1, c2, c3, c4 = st.columns(4)
@@ -430,7 +426,7 @@ def render_live_dashboard(target_temp, show_target, manual_price):
         edge_color = "off"
         if edge > 15: edge_color = "normal" 
         if edge < -15: edge_color = "inverse"
-        st.metric(f"Market 'Yes' ({kalshi_status})", f"{kalshi_price}¢", f"{edge:+.0f}% Edge", delta_color=edge_color)
+        st.metric(f"Market Yes ({target_temp})", f"{kalshi_price}¢", f"{edge:+.0f}% Edge", delta_color=edge_color)
 
     # --- PROJECTION BOARD ---
     next_3_hours = []
@@ -460,20 +456,22 @@ def render_live_dashboard(target_temp, show_target, manual_price):
 
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
 
-    if show_target:
-        status_msg = "❄️ COLD"
-        if target_temp - 0.5 <= latest['Temp'] < target_temp:
-            status_msg = f"⚠️ TRAP ZONE (Within 0.5° of {target_temp})"
-            st.warning(f"**STATUS:** {status_msg}")
-        elif latest['Temp'] >= target_temp:
-            status_msg = f"✅ TARGET SECURED (Above {target_temp})"
-            st.success(f"**STATUS:** {status_msg}")
-        else:
-            st.caption(f"**STATUS:** {status_msg} (Gap: {target_temp - latest['Temp']:.2f}°F)")
+    # --- MARKET DEPTH (NEW!) ---
+    if market_df is not None and not market_df.empty:
+        st.markdown("### 📊 Market Depth (Strike vs Price)")
+        st.dataframe(
+            market_df, 
+            hide_index=True, 
+            use_container_width=True,
+            column_config={
+                "Strike": st.column_config.NumberColumn("Strike Temp", format="%.1f°F"),
+                "Price": st.column_config.ProgressColumn("Yes Price (¢)", min_value=0, max_value=99, format="%d¢"),
+                "Ticker": st.column_config.TextColumn("Contract", width="small")
+            }
+        )
 
     # --- SENSOR TABLE ---
     st.subheader("Sensor Log (Miami Time)")
-    # (Clean_rows is already initialized at the top, we just fill it now)
     for i, row in enumerate(history[:15]):
         vel_str = "—"
         if i < len(history) - 1:
@@ -574,16 +572,11 @@ def main():
     if show_target:
         target_temp = st.sidebar.number_input("Strike Price", value=76.0, step=0.1, format="%.1f")
 
-    # KALSHI MARKET INPUT
-    st.sidebar.divider()
-    st.sidebar.markdown("**📉 Market Sentiment**")
-    manual_price = st.sidebar.slider("Manual Price Override", 1, 99, 50)
-
     now_miami = get_miami_time()
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
     f_data = fetch_forecast_data()
     
-    if view_mode == "Live Monitor": render_live_dashboard(target_temp, show_target, manual_price)
+    if view_mode == "Live Monitor": render_live_dashboard(target_temp, show_target)
     elif view_mode == "Today's Forecast": render_forecast_generic(f_data['today_daily'], f_data['today_hourly'], f_data['taf'], now_miami.strftime("%A, %b %d"))
     elif view_mode == "Tomorrow's Forecast": render_forecast_generic(f_data['tomorrow_daily'], f_data['tomorrow_hourly'], f_data['taf'], (now_miami + timedelta(days=1)).strftime("%A, %b %d"))
 
