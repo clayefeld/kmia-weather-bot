@@ -3,11 +3,9 @@ import requests
 import re
 import pandas as pd
 from datetime import datetime, timedelta, timezone 
-# standard library usually available, but we wrap in try just in case
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
-    # Fallback for older python environments if needed
     from backports.zoneinfo import ZoneInfo
 
 # --- CONFIGURATION ---
@@ -21,14 +19,13 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(myweatherbot_v9_fixed, myemail@example.com)'}
+    return {'User-Agent': '(myweatherbot_v10_projections, myemail@example.com)'}
 
 def get_miami_time():
     """Returns the current time explicitly in US/Eastern (Miami Time)"""
     try:
         return datetime.now(ZoneInfo("US/Eastern"))
     except:
-        # Fallback to fixed offset if ZoneInfo fails on server
         return datetime.now(timezone(timedelta(hours=-5)))
 
 def parse_iso_time(iso_str):
@@ -38,7 +35,6 @@ def parse_iso_time(iso_str):
         return None
 
 def get_display_time(dt_utc):
-    # Convert any UTC timestamp to Miami Time for display
     try:
         dt_miami = dt_utc.astimezone(ZoneInfo("US/Eastern"))
     except:
@@ -49,8 +45,6 @@ def get_display_time(dt_utc):
 def fetch_live_history():
     data_list = []
     error_msg = None
-    
-    # 1. NWS History
     try:
         r = requests.get(NWS_API_HISTORY, headers=get_headers(), timeout=4)
         if r.status_code == 200:
@@ -60,7 +54,6 @@ def fetch_live_history():
                 if temp_c is None: continue
                 ts = props.get('timestamp')
                 if not ts: continue
-                # Parse as UTC
                 dt_utc = datetime.fromisoformat(ts.split('+')[0]).replace(tzinfo=timezone.utc)
                 f_val = (temp_c * 1.8) + 32
                 
@@ -69,7 +62,7 @@ def fetch_live_history():
                 w_str = "--"
                 if wdir is not None and wspd is not None:
                      w_str = f"{int(wdir):03d} @ {int(wspd/1.852)}kt"
-
+                
                 sky_str = "--"
                 clouds = props.get('cloudLayers', [])
                 if clouds: sky_str = clouds[0].get('amount', '--')
@@ -80,12 +73,12 @@ def fetch_live_history():
                     "Temp": f_val,
                     "Official": int(round(f_val)),
                     "Wind": w_str,
-                    "Sky": sky_str
+                    "Sky": sky_str,
+                    "WindVal": int(wdir) if wdir else 0
                 })
     except Exception as e:
         error_msg = str(e)
 
-    # 2. Aviation METAR
     try:
         r = requests.get(AWC_METAR_URL, timeout=4)
         for line in r.text.split('\n'):
@@ -106,7 +99,10 @@ def fetch_live_history():
                     
                     w_m = re.search(r"\b(\d{3}|VRB)(\d{2,3})G?(\d{2,3})?KT\b", line)
                     w_str = "--"
-                    if w_m: w_str = f"{w_m.group(1)} @ {w_m.group(2)}kt"
+                    w_val = 0
+                    if w_m: 
+                        w_str = f"{w_m.group(1)} @ {w_m.group(2)}kt"
+                        if w_m.group(1).isdigit(): w_val = int(w_m.group(1))
 
                     s_m = re.search(r"\b(CLR|FEW|SCT|BKN|OVC|VV)\d{3}", line)
                     sky = s_m.group(1) if s_m else "CLR"
@@ -117,7 +113,8 @@ def fetch_live_history():
                         "Temp": f_val,
                         "Official": int(round(f_val)),
                         "Wind": w_str,
-                        "Sky": sky
+                        "Sky": sky,
+                        "WindVal": w_val
                     })
     except Exception as e:
         if not error_msg: error_msg = str(e)
@@ -129,9 +126,8 @@ def fetch_forecast_data():
     data = {
         "today_daily": None, "today_hourly": [],
         "tomorrow_daily": None, "tomorrow_hourly": [],
-        "taf": None
+        "taf": None, "all_hourly": [] # Store all hourly for projection logic
     }
-    
     try:
         r = requests.get(NWS_POINT_URL, headers=get_headers(), timeout=5)
         if r.status_code == 200:
@@ -139,12 +135,11 @@ def fetch_forecast_data():
             daily_url = props.get('forecast')
             hourly_url = props.get('forecastHourly')
             
-            # Setup Dates (Miami Time)
             now_miami = get_miami_time()
             today_str = now_miami.strftime("%Y-%m-%d")
             tomorrow_str = (now_miami + timedelta(days=1)).strftime("%Y-%m-%d")
             
-            # 1. Fetch Daily
+            # Daily
             r_d = requests.get(daily_url, headers=get_headers(), timeout=5)
             if r_d.status_code == 200:
                 periods = r_d.json().get('properties', {}).get('periods', [])
@@ -153,24 +148,22 @@ def fetch_forecast_data():
                         data["tomorrow_daily"] = p
                     if today_str in p['startTime'] and p['isDaytime']:
                         data["today_daily"] = p
-                    # Fallback if daytime passed
                     if not data["today_daily"] and today_str in p['startTime']:
                          data["today_daily"] = p
 
-            # 2. Fetch Hourly
+            # Hourly
             r_h = requests.get(hourly_url, headers=get_headers(), timeout=5)
             if r_h.status_code == 200:
                 periods = r_h.json().get('properties', {}).get('periods', [])
                 for p in periods:
+                    data["all_hourly"].append(p) # Save for calculations
                     if tomorrow_str in p['startTime']:
                         data["tomorrow_hourly"].append(p)
                     if today_str in p['startTime']:
                         data["today_hourly"].append(p)
         
-        # 3. TAF
         r_t = requests.get(AWC_TAF_URL, timeout=5)
         if r_t.status_code == 200: data["taf"] = r_t.text
-        
     except: pass
     return data
 
@@ -200,6 +193,7 @@ def render_live_dashboard():
         st.rerun()
         
     history, err = fetch_live_history()
+    f_data = fetch_forecast_data() # Need forecast for projections
     
     if not history:
         st.error("Connection Failed: No Data Available")
@@ -209,10 +203,9 @@ def render_live_dashboard():
     latest = history[0]
     high_mark = max(history, key=lambda x: x['Temp'])
     high_round = int(round(high_mark['Temp']))
-    
     smart_trend = calculate_smart_trend(history)
 
-    # Solar Calc (Miami Time)
+    # --- SOLAR & TIME CALCS ---
     now_miami = get_miami_time()
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
     time_left = sunset_miami - now_miami
@@ -233,18 +226,62 @@ def render_live_dashboard():
     with col4:
         st.metric("Solar Fuel", solar_fuel)
 
-    # --- STATUS BAR ---
-    status_msg = "❄️ COLD"
-    if 71.5 <= latest['Temp'] < 72.0: status_msg = "⚠️ TRAP ZONE"
-    elif latest['Temp'] >= 72.0: status_msg = "✅ TARGET SECURED"
-    st.info(f"**STATUS: {status_msg}**")
+    # --- NEW: TREND & PROJECTION BOARD ---
+    # Logic: Blend current trend velocity with NWS hourly forecast
+    projections = []
+    
+    # Filter forecast for NEXT 3 hours
+    next_3_hours = []
+    current_utc = datetime.now(timezone.utc)
+    for p in f_data['all_hourly']:
+        p_dt = parse_iso_time(p['startTime'])
+        if p_dt > current_utc:
+            next_3_hours.append(p)
+            if len(next_3_hours) >= 3: break
+    
+    if len(next_3_hours) < 3:
+        # Fallback if forecast missing
+        proj_str = "⚠️ Forecast Data Unavailable for Projection"
+    else:
+        # Calculate Weighted Projections
+        proj_vals = []
+        curr_temp = latest['Temp']
+        
+        for i, f in enumerate(next_3_hours):
+            nws_temp = f['temperature']
+            
+            # Weighting: Hour 1 uses 60% trend, Hour 2 uses 30%, Hour 3 uses 20%
+            trend_weight = 0.6 / (i + 1)
+            model_weight = 1.0 - trend_weight
+            
+            # Math: (Start + (Trend * Hours)) * Weight + (NWS_Forecast * Weight)
+            raw_proj = (curr_temp + (smart_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
+            
+            # Adjustments
+            if 0 <= latest.get('WindVal', 0) <= 180: raw_proj -= (0.5 * (i+1)) # East Wind Cools
+            if solar_fuel == "NIGHT": raw_proj -= (0.5 * (i+1)) # Night cooling
+            
+            icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
+            if "Sunny" in f['shortForecast']: icon = "☀️"
+            
+            proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
+        
+        proj_str = " | ".join(proj_vals)
+
+    # Visual Trend Icon
+    trend_icon = "➡️"
+    if smart_trend > 0.5: trend_icon = "🔥 Rising Fast"
+    elif smart_trend > 0.1: trend_icon = "↗️ Rising"
+    elif smart_trend < -0.5: trend_icon = "❄️ Dropping Fast"
+    elif smart_trend < -0.1: trend_icon = "↘️ Falling"
+    else: trend_icon = "➡️ Flat"
+
+    st.success(f"**📈 TREND:** {trend_icon} ({smart_trend:+.2f}°F/hr) \n\n **🔮 PROJECTION:** {proj_str}")
 
     # --- CLEAN TABLE ---
     st.subheader("Data Feed (Miami Time)")
-    
     clean_rows = []
     for i, row in enumerate(history[:15]):
-        # Velocity
         vel_str = "—"
         if i < len(history) - 1:
             dt1, dt2 = row['dt_utc'], history[i+1]['dt_utc']
@@ -277,7 +314,7 @@ def render_live_dashboard():
         hide_index=True
     )
 
-# --- VIEW: SHARED FORECAST RENDERER ---
+# --- VIEW: FORECAST RENDERER ---
 def render_forecast_generic(daily, hourly, taf, date_label):
     st.title(f"📅 Forecast for {date_label}")
     
@@ -289,7 +326,6 @@ def render_forecast_generic(daily, hourly, taf, date_label):
         st.warning(f"Forecast data unavailable for {date_label}.")
         return
 
-    # --- SCORE LOGIC ---
     score = 10
     rain_hours = 0
     for h in hourly:
@@ -301,7 +337,6 @@ def render_forecast_generic(daily, hourly, taf, date_label):
     if rain_hours > 4: score -= 2        
     score = max(1, min(10, score))
     
-    # --- HEADER METRICS ---
     c1, c2 = st.columns([1, 2])
     with c1:
         st.metric("Confidence Score", f"{score}/10")
@@ -311,7 +346,6 @@ def render_forecast_generic(daily, hourly, taf, date_label):
             st.success(f"**Analyst Note:** {daily['detailedForecast']}")
             st.caption(f"Winds: {daily['windSpeed']} • Temp: {daily['temperature']}°F")
 
-    # --- HOURLY TABLE ---
     st.subheader("Hourly Breakdown (Miami Time)")
     h_data = []
     for h in hourly:
@@ -364,7 +398,6 @@ def main():
     now_miami = get_miami_time()
     st.sidebar.caption(f"Last Load: {now_miami.strftime('%I:%M:%S %p')} Miami Time")
 
-    # Fetch all data once
     f_data = fetch_forecast_data()
 
     if view_mode == "Live Monitor":
