@@ -472,7 +472,7 @@ def main():
     # KALSHI MARKET INPUT
     st.sidebar.divider()
     st.sidebar.markdown("**📉 Market Sentiment**")
-    manual_price = st.sidebar.slider("Current Market Price (Yes)", 1, 99, 50)
+    manual_price = st.sidebar.slider("Manual Price Override", 1, 99, 50)
 
     now_miami = get_miami_time()
     st.sidebar.caption(f"System Time: {now_miami.strftime('%I:%M:%S %p')}")
