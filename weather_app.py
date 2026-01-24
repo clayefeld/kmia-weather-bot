@@ -24,14 +24,25 @@ except ImportError:
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Project Helios", page_icon="☀️", layout="wide")
 
-# URLs
+# --- DATA SOURCES (VERIFIED KMIA) ---
+# 1. NWS Station Data (Directly from KMIA Sensor)
 NWS_API_HISTORY = "https://api.weather.gov/stations/KMIA/observations"
+
+# 2. Aviation Weather Center (Pilot METARs for KMIA)
 AWC_METAR_URL = "https://aviationweather.gov/api/data/metar?ids=KMIA&format=raw&hours=12"
-NWS_POINT_URL = "https://api.weather.gov/points/25.7906,-80.3164"
+
+# 3. NWS Forecast Grid (Centered on KMIA ASOS Sensor: 25.7954, -80.2901)
+NWS_POINT_URL = "https://api.weather.gov/points/25.7954,-80.2901"
+
+# 4. Aviation TAF (Terminal Aerodrome Forecast for KMIA)
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
+
+# 5. Kalshi Market API
 KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
-# New: Open-Meteo (HRRR Model)
-OM_API_URL = "https://api.open-meteo.com/v1/forecast?latitude=25.7906&longitude=-80.3164&hourly=temperature_2m,precipitation_probability,shortwave_radiation,cloud_cover&timezone=America%2FNew_York&forecast_days=1&models=hrrr_north_america"
+
+# 6. Open-Meteo HRRR Model (High-Res Physics)
+# Updated to EXACT KMIA Sensor Coordinates: 25.7954°N, 80.2901°W
+OM_API_URL = "https://api.open-meteo.com/v1/forecast?latitude=25.7954&longitude=-80.2901&hourly=temperature_2m,precipitation_probability,shortwave_radiation,cloud_cover&timezone=America%2FNew_York&forecast_days=1&models=hrrr_north_america"
 
 # --- GLOBAL STYLES ---
 HIDE_INDEX_CSS = """
@@ -149,7 +160,7 @@ def fetch_market_data():
 
 # --- UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v57_hrrr, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v58_precision, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -186,7 +197,7 @@ def calculate_heat_index(temp_f, humidity):
     hi = c1 + (c2 * T) + (c3 * R) + (c4 * T * R) + (c5 * T**2) + (c6 * R**2) + (c7 * T**2 * R) + (c8 * T * R**2) + (c9 * T**2 * R**2)
     return hi
 
-# --- AI AGENT (ENHANCED WITH HRRR) ---
+# --- AI AGENT ---
 def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, press_in, rad_watts, precip_prob):
     reasons = []
     sentiment = "NEUTRAL"
@@ -344,9 +355,7 @@ def fetch_forecast_data():
         r_om = requests.get(OM_API_URL, timeout=3)
         if r_om.status_code == 200:
             hrrr = r_om.json().get('hourly', {})
-            # Get current hour index
             current_hour = datetime.now().hour
-            # Extract basic params
             data["hrrr_now"] = {
                 "rad": hrrr['shortwave_radiation'][current_hour],
                 "precip": hrrr['precipitation_probability'][current_hour],
@@ -419,7 +428,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
         for h in history[1:5]:
             if h.get('WindVal', -1) != -1: wind_dir = h['WindVal']; break
     
-    # HRRR Data Extraction
     hrrr_rad = 0
     hrrr_precip = 0
     if f_data['hrrr_now']:
@@ -428,7 +436,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
                 
     ai_sent, ai_reason, ai_conf = get_agent_analysis(safe_trend, hum, wind_dir, solar_min, latest['Sky'], dew, latest['Temp'], press, hrrr_rad, hrrr_precip)
 
-    # Referee Logic
     referee_msg = None
     if bracket_cap is not None:
         if high_round > bracket_cap:
@@ -441,7 +448,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
 
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
 
-    # METRICS GRID
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.metric("Temp", f"{latest['Temp']:.2f}°F", f"Feels {feels_like:.1f}°")
     with c2: st.metric("Proj. High", f"{forecast_high}°F", "Forecast", delta_color="off")
@@ -472,7 +478,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
         else:
             st.metric(f"Kalshi ({bracket_label})", "--", "API Error")
 
-    # Projection
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -497,7 +502,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
         proj_str = " | ".join(proj_vals)
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
 
-    # Bracket Selector
     st.subheader("🎯 Select Bracket (Live Markets)")
     def set_target(val): st.query_params["target"] = str(val)
     markets, m_status = fetch_market_data()
@@ -511,7 +515,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
                 set_target(m['strike'])
                 st.rerun()
 
-    # Sensor Log
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
