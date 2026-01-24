@@ -64,11 +64,12 @@ class KalshiAuth:
         )
         return base64.b64encode(signature).decode('utf-8')
 
-# --- SMART MARKET FETCHER ---
+# --- SMART MARKET FETCHER (CORRECTED BOUNDARIES) ---
 @st.cache_data(ttl=60)
 def fetch_market_data():
     """
     Finds the active Miami High Temp event dynamically and returns bracket prices.
+    Includes logic to fix 1-degree offset on outer brackets.
     """
     if not CRYPTO_AVAILABLE: return [], "🔴 Crypto Lib Missing"
     auth = KalshiAuth()
@@ -109,17 +110,34 @@ def fetch_market_data():
         
         final_list = []
         count = len(parsed_markets)
+        
         for i, m in enumerate(parsed_markets):
             label = "Unknown"
             strike_val = m['floor'] if m['floor'] else m['cap']
+            
+            # --- SMART BOUNDARY LOGIC ---
             if i == 0:
+                # Bottom Bracket (e.g. 76 or below)
                 val = m['cap'] if m['cap'] else m['floor']
-                label = f"{val} or below"
+                # Check overlap with next bracket to confirm shift
+                if count > 1 and parsed_markets[1]['floor'] == val:
+                    val = val - 1
+                
+                label = f"{int(val)} or below"
                 strike_val = val 
+                
             elif i == count - 1:
+                # Top Bracket (e.g. 85 or above)
                 val = m['floor'] if m['floor'] else m['cap']
-                label = f"{val} or above"
+                # Check overlap with prev bracket
+                if count > 1 and parsed_markets[i-1]['cap'] == val:
+                    val = val + 1
+                    
+                label = f"{int(val)} or above"
+                strike_val = val
+                
             else:
+                # Middle Brackets (No change needed usually)
                 label = f"{m['floor']} - {m['cap']}"
             
             final_list.append({"label": label, "strike": float(strike_val), "price": m['price']})
@@ -131,7 +149,7 @@ def fetch_market_data():
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v46_ui_fix, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v47_boundary_fix, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -235,8 +253,7 @@ def fetch_live_history():
         r = requests.get(AWC_METAR_URL, timeout=4)
         for line in r.text.split('\n'):
             if "KMIA" in line:
-                # Basic METAR parsing... (Abbreviated for brevity, same as before)
-                # ... (This part is standard, using simplified logic for safety)
+                # Basic METAR (Abbreviated)
                 pass 
     except: pass
     
@@ -296,7 +313,7 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
     if today_records:
         high_mark = max(today_records, key=lambda x: x['Temp'])
     else:
-        high_mark = latest # Just started the day (e.g. 12:01 AM)
+        high_mark = latest
 
     high_round = int(round(high_mark['Temp']))
     smart_trend = calculate_smart_trend(history)
@@ -333,7 +350,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
     with c1: st.metric("Current Temp", f"{latest['Temp']:.2f}°F", f"{smart_trend:+.2f}/hr")
     with c2: st.metric("Official Round", f"{latest['Official']}°F")
     with c3:
-        # Use filtered high_mark
         st.metric("Day High (Today)", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
     with c4: st.metric("Solar Fuel", solar_fuel)
 
@@ -387,19 +403,16 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
 
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
 
-    # --- BRACKET SELECTOR (MOVED HERE) ---
+    # --- BRACKET SELECTOR ---
     st.subheader("🎯 Select Bracket (Live Markets)")
     
-    # Helper for parameter updates
     def set_target(val): st.query_params["target"] = str(val)
 
-    # Fetch markets
     markets, m_status = fetch_market_data()
     
     if not markets:
         st.warning(f"Market Connection Status: {m_status}")
     else:
-        # Create columns for buttons
         cols = st.columns(len(markets))
         for i, m in enumerate(markets):
             label = f"{m['label']}\n({m['price']}¢)"
