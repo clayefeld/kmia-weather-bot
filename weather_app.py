@@ -40,7 +40,7 @@ HIDE_INDEX_CSS = """
     </style>
     """
 
-# --- CRITICAL UTILS (Defined First) ---
+# --- UTILS ---
 def get_miami_time():
     try: return datetime.now(ZoneInfo("US/Eastern"))
     except: return datetime.now(timezone(timedelta(hours=-5)))
@@ -480,11 +480,10 @@ def main():
     view_mode = st.sidebar.radio("Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
     
-    # SILENT AUTO-REFRESH
+    # NON-BLOCKING JS REFRESH
     if "auto" not in st.query_params: st.query_params["auto"] = "true"
     if st.sidebar.checkbox("⚡ Auto-Refresh (10s)", value=True):
-        time.sleep(10)
-        st.rerun()
+        components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 10000);</script>""", height=0)
 
     markets, _ = fetch_market_data()
     lbl, price, cap = "Target", 0, None
