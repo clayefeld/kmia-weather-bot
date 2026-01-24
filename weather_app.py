@@ -13,14 +13,6 @@ try:
 except ImportError:
     from backports.zoneinfo import ZoneInfo
 
-# --- LIBRARY CHECK ---
-try:
-    from cryptography.hazmat.primitives import serialization, hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    CRYPTO_AVAILABLE = False
-
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Project Helios", page_icon="☀️", layout="wide")
 
@@ -47,6 +39,24 @@ HIDE_INDEX_CSS = """
     }
     </style>
     """
+
+# --- UTILITY FUNCTIONS (Defined First to avoid NameError) ---
+def get_miami_time():
+    try: return datetime.now(ZoneInfo("US/Eastern"))
+    except: return datetime.now(timezone(timedelta(hours=-5)))
+
+def parse_iso_time(iso_str):
+    try: return datetime.fromisoformat(iso_str)
+    except: return None
+
+def get_display_time(dt_utc):
+    return dt_utc.astimezone(ZoneInfo("US/Eastern")).strftime("%I:%M %p")
+
+def calculate_heat_index(temp_f, humidity):
+    if temp_f < 80: return temp_f 
+    c1, c2, c3, c4, c5, c6, c7, c8, c9 = -42.379, 2.04901523, 10.14333127, -0.22475541, -6.83783e-3, -5.481717e-2, 1.22874e-3, 8.5282e-4, -1.99e-6
+    T, R = temp_f, humidity
+    return c1 + (c2 * T) + (c3 * R) + (c4 * T * R) + (c5 * T**2) + (c6 * R**2) + (c7 * T**2 * R) + (c8 * T * R**2) + (c9 * T**2 * R**2)
 
 # --- KALSHI AUTH ---
 class KalshiAuth:
@@ -85,7 +95,7 @@ def fetch_market_data():
     if not auth.ready: return [], "🔴 Key Error"
 
     try:
-        now_miami = datetime.now(ZoneInfo("US/Eastern"))
+        now_miami = get_miami_time()
         date_str = now_miami.strftime("%y%b%d").upper() 
         event_ticker = f"KXHIGHMIA-{date_str}"
         path = f"/events/{event_ticker}"
@@ -136,26 +146,13 @@ def fetch_market_data():
     except:
         return [], "🔴 API Error"
 
-# --- UTILS ---
-def get_miami_time():
-    return datetime.now(ZoneInfo("US/Eastern"))
-
-def get_display_time(dt_utc):
-    return dt_utc.astimezone(ZoneInfo("US/Eastern")).strftime("%I:%M %p")
-
-def calculate_heat_index(temp_f, humidity):
-    if temp_f < 80: return temp_f 
-    c1, c2, c3, c4, c5, c6, c7, c8, c9 = -42.379, 2.04901523, 10.14333127, -0.22475541, -6.83783e-3, -5.481717e-2, 1.22874e-3, 8.5282e-4, -1.99e-6
-    T, R = temp_f, humidity
-    return c1 + (c2 * T) + (c3 * R) + (c4 * T * R) + (c5 * T**2) + (c6 * R**2) + (c7 * T**2 * R) + (c8 * T * R**2) + (c9 * T**2 * R**2)
-
 # --- AI AGENT (DIURNAL LOGIC) ---
 def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, press_in, rad_watts, precip_prob, current_hour):
     reasons = []
     sentiment = "NEUTRAL"
     confidence = 50 
     
-    # 1. DIURNAL CURVE (TIME OF DAY)
+    # 1. DIURNAL CURVE
     if current_hour >= 15: # 3 PM+
         reasons.append(f"Late Day ({current_hour}:00) - Cooling Bias")
         confidence = 30 
@@ -274,20 +271,15 @@ def fetch_forecast_data():
     # HRRR FIX: EXACT STRING MATCHING
     try:
         r = requests.get(OM_API_URL, timeout=3)
-        if r.status_code == 200:
+        if r_om.status_code == 200:
             hrrr = r.json()
-            # Construct target string: 2026-01-24T13:00
-            current_hour_str = datetime.now(ZoneInfo("US/Eastern")).strftime("%Y-%m-%dT%H:00")
-            
+            current_hour_str = get_miami_time().strftime("%Y-%m-%dT%H:00")
             times = hrrr.get('hourly', {}).get('time', [])
             idx = -1
-            
-            # 1. Exact Match
             if current_hour_str in times:
                 idx = times.index(current_hour_str)
             else:
-                # 2. Fallback: Prefix Match
-                prefix = datetime.now(ZoneInfo("US/Eastern")).strftime("%Y-%m-%dT%H")
+                prefix = get_miami_time().strftime("%Y-%m-%dT%H")
                 for i, t in enumerate(times):
                     if t.startswith(prefix): idx = i; break
             
@@ -301,6 +293,22 @@ def fetch_forecast_data():
                 }
     except: pass
     return data
+
+def calculate_smart_trend(master_list):
+    if len(master_list) < 2: return 0.0
+    now = master_list[0]['dt_utc']
+    one_hr_ago = now - timedelta(hours=1)
+    points = [p for p in master_list if p['dt_utc'] >= one_hr_ago]
+    if len(points) < 2: return 0.0
+    x = [(p['dt_utc'] - one_hr_ago).total_seconds()/60 for p in points]
+    y = [p['Temp'] for p in points]
+    N = len(x)
+    sum_x, sum_y = sum(x), sum(y)
+    sum_xy = sum(i*j for i, j in zip(x,y))
+    sum_xx = sum(i*i for i in x)
+    den = (N*sum_xx - sum_x*sum_x)
+    if den == 0: return 0.0
+    return ((N*sum_xy - sum_x*sum_y) / den) * 60
 
 # --- RENDERER ---
 def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
@@ -346,12 +354,12 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
 
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     
-    # METRICS (CLASSIC LAYOUT)
+    # METRICS GRID
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Temp", f"{latest['Temp']:.2f}°F", f"Feels {calculate_heat_index(latest['Temp'], latest['Hum']):.0f}")
-    c2.metric("Proj. High", f"{forecast_high}°F", "Forecast", delta_color="off")
-    c3.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
-    c4.metric("Solar (HRRR)", f"{hrrr_rad} W/m²")
+    with c1: st.metric("Temp", f"{latest['Temp']:.2f}°F", f"Feels {calculate_heat_index(latest['Temp'], latest['Hum']):.0f}")
+    with c2: st.metric("Proj. High", f"{forecast_high}°F", "Forecast", delta_color="off")
+    with c3: st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Official: {high_round}°F", delta_color="off")
+    with c4: st.metric("Solar (HRRR)", f"{hrrr_rad} W/m²")
 
     st.markdown("---")
     m1, m2 = st.columns([2,1])
@@ -391,7 +399,7 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
         proj_str = " | ".join(proj_vals)
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
 
-    # BRACKETS (CLASSIC LAYOUT)
+    # BRACKETS
     st.subheader("🎯 Select Bracket (Live Markets)")
     markets, _ = fetch_market_data()
     cols = st.columns(len(markets) if markets else 1)
