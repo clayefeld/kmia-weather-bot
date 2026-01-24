@@ -40,7 +40,7 @@ HIDE_INDEX_CSS = """
     </style>
     """
 
-# --- UTILS ---
+# --- CRITICAL UTILS (Defined First) ---
 def get_miami_time():
     try: return datetime.now(ZoneInfo("US/Eastern"))
     except: return datetime.now(timezone(timedelta(hours=-5)))
@@ -146,30 +146,30 @@ def fetch_market_data():
     except:
         return [], "🔴 API Error"
 
-# --- AI AGENT (DIURNAL LOGIC) ---
+# --- AI AGENT ---
 def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, press_in, rad_watts, precip_prob, current_hour):
     reasons = []
     sentiment = "NEUTRAL"
     confidence = 50 
     
-    # 1. DIURNAL CURVE
+    # 1. DIURNAL
     if current_hour >= 15: 
-        reasons.append(f"Late Day ({current_hour}:00) - Cooling Bias")
+        reasons.append(f"Late Day ({current_hour}:00)")
         confidence = 30 
-        if trend > 0: reasons.append("Ignoring late-day noise")
+        if trend > 0: reasons.append("Ignoring late noise")
     elif current_hour >= 12: 
-        reasons.append("Peak Heating Window")
+        reasons.append("Peak Heating")
         confidence = 60
     elif current_hour < 11: 
-        reasons.append("Morning Ramp-Up")
+        reasons.append("Morning Ramp")
         confidence = 80
 
-    # 2. Solar (HRRR)
+    # 2. Solar
     if rad_watts > 700:
-        reasons.append(f"High Solar ({int(rad_watts)} W/m²)")
+        reasons.append(f"High Solar ({int(rad_watts)} W)")
         if current_hour < 14: confidence += 15
     elif rad_watts < 200 and current_hour < 17:
-        reasons.append(f"Low Solar ({int(rad_watts)} W/m²)")
+        reasons.append(f"Low Solar ({int(rad_watts)} W)")
         confidence -= 15
         if sentiment == "NEUTRAL": sentiment = "BEARISH"
 
@@ -180,22 +180,16 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, pres
         sentiment = "TRAP"
         confidence = 10
     elif dew_dep > 12:
-        reasons.append("Dry Air (Heating Possible)")
+        reasons.append("Dry Air")
         if current_hour < 14: confidence += 10
 
     # 4. Wind
     if 0 <= wind_dir <= 180:
-        reasons.append("Ocean Breeze (Cooling)")
+        reasons.append("Ocean Breeze")
         if sentiment == "NEUTRAL": confidence = 30
     elif wind_dir > 180:
-        reasons.append("Land Breeze (Heating)")
+        reasons.append("Land Breeze")
         confidence += 5
-
-    # 5. Radar
-    if precip_prob > 40:
-        reasons.append(f"Rain Risk {precip_prob}%")
-        sentiment = "BEARISH"
-        confidence = 5
 
     if confidence > 75 and sentiment == "NEUTRAL": sentiment = "BULLISH"
     if confidence < 35 and sentiment == "NEUTRAL": sentiment = "BEARISH"
@@ -307,7 +301,7 @@ def fetch_forecast_data():
                 data["all_hourly"] = r_h.json()['properties']['periods']
     except: pass
     
-    # HRRR FIX: DIRECT INDEXING
+    # HRRR
     try:
         r = requests.get(OM_API_URL, timeout=3)
         if r.status_code == 200:
@@ -355,21 +349,21 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
     high_mark = max(today_recs, key=lambda x: x['Temp']) if today_recs else latest
     high_round = int(round(high_mark['Temp']))
     
-    # Physics Extraction
-    hrrr_rad = f_data['hrrr_now']['rad'] if f_data['hrrr_now'] else 0
-    hrrr_precip = f_data['hrrr_now']['precip'] if f_data['hrrr_now'] else 0
+    hrrr_rad = 0
+    hrrr_precip = 0
+    if f_data.get('hrrr_now'):
+        hrrr_rad = f_data['hrrr_now']['rad']
+        hrrr_precip = f_data['hrrr_now']['precip']
     
     smart_trend = calculate_smart_trend(history)
     safe_trend = smart_trend
     if now_miami.hour > 17 and safe_trend < -0.5: safe_trend = -0.5
 
-    # AI Analysis
     ai_sent, ai_reason, ai_conf = get_agent_analysis(
         safe_trend, latest['Hum'], latest['WindVal'], 999, latest['Sky'], 
         latest['Dew'], latest['Temp'], latest['Press'], hrrr_rad, hrrr_precip, now_miami.hour
     )
 
-    # Referee Logic
     ref_msg = None
     if bracket_cap and high_round > bracket_cap:
         ai_conf = 0
@@ -379,7 +373,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
         ai_conf = max(0, ai_conf - 50)
         ref_msg = f"⚠️ HOLDING RISK: ITM, but heating continues."
 
-    # Forecast High
     forecast_high = high_round 
     if f_data.get('today_daily'):
         nws_high = f_data['today_daily'].get('temperature')
@@ -387,7 +380,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
 
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     
-    # METRICS
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Temp", f"{latest['Temp']:.2f}°F", f"Feels {calculate_heat_index(latest['Temp'], latest['Hum']):.0f}")
     c2.metric("Proj. High", f"{forecast_high}°F", "Forecast", delta_color="off")
@@ -407,7 +399,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
     edge = ai_conf - (live_price or 0)
     m2.metric(f"Kalshi ({bracket_label})", f"{live_price}¢", f"{edge:+.0f}% Edge", delta_color="off")
 
-    # PROJECTION
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data['all_hourly']:
@@ -431,7 +422,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
         proj_str = " | ".join(proj_vals)
     st.success(f"**🔮 AI PROJECTION:** {proj_str}")
 
-    # BRACKETS
     st.subheader("🎯 Select Bracket (Live Markets)")
     markets, _ = fetch_market_data()
     cols = st.columns(len(markets) if markets else 1)
@@ -441,7 +431,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
                 st.query_params["target"] = str(m['strike'])
                 st.rerun()
 
-    # LOG (RESTORED COLUMNS)
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
@@ -480,6 +469,8 @@ def render_forecast_generic(daily, hourly, taf, date_label):
             dt = parse_iso_time(h['startTime'])
             h_data.append({"Time": dt.strftime("%I %p"), "Temp": h['temperature'], "Cond": h['shortForecast'], "Wind": f"{h['windDirection']} {h['windSpeed']}"})
         st.table(pd.DataFrame(h_data))
+    else:
+        st.warning("⚠️ Forecast data temporarily unavailable from NWS.")
 
 # --- MAIN ---
 def main():
@@ -489,9 +480,9 @@ def main():
     view_mode = st.sidebar.radio("Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
     
-    # SMOOTH REFRESH (NO FLASH)
+    # SILENT AUTO-REFRESH
     if "auto" not in st.query_params: st.query_params["auto"] = "true"
-    if st.query_params["auto"] == "true":
+    if st.sidebar.checkbox("⚡ Auto-Refresh (10s)", value=True):
         time.sleep(10)
         st.rerun()
 
