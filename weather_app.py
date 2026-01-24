@@ -1183,7 +1183,7 @@ def render_forecast_generic(
     f_data: Dict[str, Any],
     which_day: str,  # "today" or "tomorrow"
 ) -> None:
-    st.title("Forecast: %s" % date_label)
+    st.title("Forecast: 📅 %s" % date_label)
 
     if st.button("🔄 Refresh Forecast"):
         st.cache_data.clear()
