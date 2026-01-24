@@ -22,7 +22,6 @@ AWC_METAR_URL = "https://aviationweather.gov/api/data/metar?ids=KMIA&format=raw&
 NWS_POINT_URL = "https://api.weather.gov/points/25.7954,-80.2901"
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
-# Requesting specific timezone to match our logic
 OM_API_URL = "https://api.open-meteo.com/v1/forecast?latitude=25.7954&longitude=-80.2901&hourly=temperature_2m,precipitation_probability,shortwave_radiation,cloud_cover&timezone=America%2FNew_York&forecast_days=2&models=hrrr_north_america"
 
 # --- GLOBAL STYLES ---
@@ -71,10 +70,8 @@ class KalshiAuth:
 # --- MARKET FETCHER ---
 @st.cache_data(ttl=5)
 def fetch_market_data():
-    try:
-        from cryptography.hazmat.primitives import serialization
-    except ImportError:
-        return [], "🔴 Crypto Lib Missing"
+    try: from cryptography.hazmat.primitives import serialization
+    except ImportError: return [], "🔴 Crypto Lib Missing"
 
     auth = KalshiAuth()
     if not auth.ready: return [], "🔴 Key Error"
@@ -144,18 +141,18 @@ def calculate_heat_index(temp_f, humidity):
     T, R = temp_f, humidity
     return c1 + (c2 * T) + (c3 * R) + (c4 * T * R) + (c5 * T**2) + (c6 * R**2) + (c7 * T**2 * R) + (c8 * T * R**2) + (c9 * T**2 * R**2)
 
-# --- AI AGENT (WITH DIURNAL LOGIC) ---
+# --- AI AGENT (DIURNAL LOGIC) ---
 def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, press_in, rad_watts, precip_prob, current_hour):
     reasons = []
     sentiment = "NEUTRAL"
     confidence = 50 
     
     # 1. DIURNAL CURVE (TIME OF DAY)
-    if current_hour >= 15: # 3 PM+ (Fade)
+    if current_hour >= 15: # 3 PM+
         reasons.append(f"Late Day ({current_hour}:00) - Cooling Bias")
-        confidence = 30 # Reduce confidence in new heating
+        confidence = 30 
         if trend > 0: reasons.append("Ignoring late-day noise")
-    elif current_hour >= 12: # 12 PM - 3 PM (Peak)
+    elif current_hour >= 12: # Peak
         reasons.append("Peak Heating Window")
         confidence = 60
     elif current_hour < 11: # Morning
@@ -266,21 +263,22 @@ def fetch_forecast_data():
                 data["all_hourly"] = r_h.json()['properties']['periods']
     except: pass
     
-    # HRRR FIX: STRING MATCHING
+    # HRRR FIX: EXACT STRING MATCHING
     try:
         r = requests.get(OM_API_URL, timeout=3)
         if r.status_code == 200:
             hrrr = r.json()
-            # 1. Get current hour string for Miami (e.g. "2026-01-24T13:00")
+            # Construct target string: 2026-01-24T13:00
             current_hour_str = datetime.now(ZoneInfo("US/Eastern")).strftime("%Y-%m-%dT%H:00")
             
-            # 2. Find exact index match
             times = hrrr.get('hourly', {}).get('time', [])
             idx = -1
+            
+            # 1. Exact Match
             if current_hour_str in times:
                 idx = times.index(current_hour_str)
             else:
-                # Fallback: Try matching just the hour prefix if minutes differ
+                # 2. Fallback: Prefix Match
                 prefix = datetime.now(ZoneInfo("US/Eastern")).strftime("%Y-%m-%dT%H")
                 for i, t in enumerate(times):
                     if t.startswith(prefix): idx = i; break
@@ -316,7 +314,7 @@ def render_dashboard(target_temp, bracket_label, live_price, bracket_cap):
     hrrr_rad = f_data['hrrr_now']['rad'] if f_data['hrrr_now'] else 0
     hrrr_precip = f_data['hrrr_now']['precip'] if f_data['hrrr_now'] else 0
     
-    # AI Analysis
+    # AI Analysis (Diurnal)
     ai_sent, ai_reason, ai_conf = get_agent_analysis(
         0, latest['Hum'], latest['WindVal'], 999, latest['Sky'], 
         latest['Dew'], latest['Temp'], latest['Press'], hrrr_rad, hrrr_precip, now_miami.hour
@@ -324,28 +322,27 @@ def render_dashboard(target_temp, bracket_label, live_price, bracket_cap):
 
     # Referee Logic
     ref_msg = None
-    delta_needed = target_temp - high_round
-    
     if bracket_cap and high_round > bracket_cap:
         ai_conf = 0
         ai_sent = "DEAD"
         ref_msg = f"💀 BUSTED: High {high_round}° > Cap {bracket_cap}°"
-    elif delta_needed <= 0:
-        if ai_sent == "BULLISH":
-            ai_conf = max(0, ai_conf - 50)
-            ref_msg = f"⚠️ HOLDING RISK: ITM, but heating continues."
-    elif delta_needed > 0:
-        if now_miami.hour >= 16:
-            ai_conf = 0
-            ref_msg = f"🛑 TOO LATE: Need +{delta_needed:.1f}°F."
+    elif high_round >= target_temp and ai_sent == "BULLISH":
+        ai_conf = max(0, ai_conf - 50)
+        ref_msg = f"⚠️ HOLDING RISK: ITM, but heating continues."
 
-    # UI
+    # Forecast High
+    forecast_high = high_round 
+    if f_data['today_daily']:
+        nws_high = f_data['today_daily'].get('temperature')
+        if nws_high: forecast_high = max(high_round, nws_high)
+
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     
+    # METRICS (CLASSIC LAYOUT)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Temp", f"{latest['Temp']:.2f}°", f"Feels {calculate_heat_index(latest['Temp'], latest['Hum']):.0f}")
-    c2.metric("Needed", f"+{max(0, delta_needed):.1f}°F" if delta_needed > 0 else "✅ ITM", "Delta", delta_color="off")
-    c3.metric("Day High", f"{high_mark['Temp']:.2f}°", f"Off: {high_round}°")
+    c1.metric("Temp", f"{latest['Temp']:.2f}°F", f"Feels {calculate_heat_index(latest['Temp'], latest['Hum']):.0f}")
+    c2.metric("Proj. High", f"{forecast_high}°F", "Forecast", delta_color="off")
+    c3.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
     c4.metric("Solar (HRRR)", f"{hrrr_rad} W/m²")
 
     st.markdown("---")
@@ -354,13 +351,39 @@ def render_dashboard(target_temp, bracket_label, live_price, bracket_cap):
     if ai_sent == "BULLISH": color = "green"
     if ai_sent == "BEARISH": color = "red"
     if ai_sent == "TRAP": color = "orange"
+    if ai_sent == "DEAD": color = "grey"
     
     m1.info(f"🤖 **PHYSICS:** :{color}[**{ai_sent}**] ({ai_conf}%)\n\n{ref_msg if ref_msg else ai_reason}")
     
     edge = ai_conf - (live_price or 0)
     m2.metric(f"Kalshi ({bracket_label})", f"{live_price}¢", f"{edge:+.0f}% Edge", delta_color="off")
 
-    st.subheader("🎯 Select Bracket")
+    # PROJECTION
+    next_3_hours = []
+    current_utc = datetime.now(timezone.utc)
+    for p in f_data['all_hourly']:
+        p_dt = parse_iso_time(p['startTime'])
+        if p_dt > current_utc:
+            next_3_hours.append(p)
+            if len(next_3_hours) >= 3: break
+    if len(next_3_hours) < 3: proj_str = "⚠️ Forecast Unavailable"
+    else:
+        proj_vals = []
+        curr_temp = latest['Temp']
+        for i, f in enumerate(next_3_hours):
+            nws_temp = f['temperature']
+            trend_weight = 0.4 / (i + 1)
+            model_weight = 1.0 - trend_weight
+            raw_proj = (curr_temp + (safe_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
+            if 0 <= wind_dir <= 180: raw_proj -= (0.5 * (i+1))
+            icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
+            if "Sunny" in f['shortForecast']: icon = "☀️"
+            proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
+        proj_str = " | ".join(proj_vals)
+    st.success(f"**🔮 AI PROJECTION:** {proj_str}")
+
+    # BRACKETS (CLASSIC LAYOUT)
+    st.subheader("🎯 Select Bracket (Live Markets)")
     markets, _ = fetch_market_data()
     cols = st.columns(len(markets) if markets else 1)
     if markets:
@@ -369,37 +392,26 @@ def render_dashboard(target_temp, bracket_label, live_price, bracket_cap):
                 st.query_params["target"] = str(m['strike'])
                 st.rerun()
 
-    st.subheader("Sensor Log")
-    df = pd.DataFrame(history[:10])
+    # LOG
+    st.subheader("Sensor Log (Miami Time)")
+    df = pd.DataFrame(history[:15])
     if not df.empty:
         df['Time'] = df['dt_utc'].apply(get_display_time)
         df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
         df['Dew'] = df['Dew'].apply(lambda x: f"{x:.1f}")
         st.table(df[['Time', 'Source', 'Temp', 'Dew', 'Hum', 'Press']])
 
-# --- FORECAST VIEW ---
-def render_forecast_generic(daily, hourly, taf, date_label):
-    st.title(f"Forecast: {date_label}")
-    if st.button(f"🔄 Refresh"): st.cache_data.clear(); st.rerun()
-    if daily: st.success(f"{daily['detailedForecast']}")
-    if hourly:
-        h_data = []
-        for h in hourly:
-            dt = parse_iso_time(h['startTime'])
-            h_data.append({"Time": dt.strftime("%I %p"), "Temp": h['temperature'], "Cond": h['shortForecast'], "Wind": f"{h['windDirection']} {h['windSpeed']}"})
-        st.table(pd.DataFrame(h_data))
-
 # --- MAIN ---
 def main():
+    if "target" not in st.query_params: st.query_params["target"] = "81.0"
+    tgt = float(st.query_params["target"])
+    
     view_mode = st.sidebar.radio("Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
     
     if "auto" not in st.query_params: st.query_params["auto"] = "true"
     components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 10000);</script>""", height=0)
 
-    if "target" not in st.query_params: st.query_params["target"] = "81.0"
-    tgt = float(st.query_params["target"])
-    
     markets, _ = fetch_market_data()
     lbl, price, cap = "Target", 0, None
     for m in markets:
