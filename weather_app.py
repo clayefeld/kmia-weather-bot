@@ -65,10 +65,9 @@ if not logger.handlers:
 # =============================================================================
 def make_session() -> requests.Session:
     s = requests.Session()
-    # NWS expects a User-Agent identifying the application
     s.headers.update(
         {
-            "User-Agent": "ProjectHelios/1.4 (Streamlit app)",
+            "User-Agent": "ProjectHelios/1.5 (Streamlit app)",
             "Accept": "application/geo+json, application/json;q=0.9, */*;q=0.8",
         }
     )
@@ -136,11 +135,17 @@ def calculate_heat_index(temp_f: float, humidity: float) -> float:
     return c1 + (c2 * T) + (c3 * R) + (c4 * T * R) + (c5 * T ** 2) + (c6 * R ** 2) + (c7 * T ** 2 * R) + (c8 * T * R ** 2) + (c9 * T ** 2 * R ** 2)
 
 
+def is_nan(x: Any) -> bool:
+    try:
+        return math.isnan(float(x))
+    except Exception:
+        return False
+
+
 def condition_icon(sky: str, wx: Optional[str] = None) -> str:
     s = (sky or "").upper()
     w = (wx or "").upper()
 
-    # Wx overrides
     if "TS" in w:
         return "⛈️"
     if "RA" in w or "SH" in w:
@@ -204,44 +209,46 @@ class KalshiAuth:
 
 
 # =============================================================================
-# KALSHI MARKET FETCHER (BRACKETS MATCH WEBSITE)
+# KALSHI MARKET FETCHER (GENERIC, MATCHES WEBSITE DAILY)
 # =============================================================================
-def kalshi_bounds_for_display(
-    floor_raw: Optional[float], cap_raw: Optional[float]
-) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+def kalshi_label_and_strike(floor_raw: Optional[float], cap_raw: Optional[float]) -> Tuple[str, float, Optional[float]]:
     """
-    Kalshi strikes can be boundary values; website shows integer *official* temps.
-
-    Display rules that match Kalshi UI for these temp buckets:
-      - Open-low  ("X° or below"): X = floor(cap_raw - eps)
-      - Middle    ("A° - B°"):     A = floor(floor_raw) + 1,  B = floor(cap_raw)
-      - Open-high ("Y° or above"): Y = floor(floor_raw) + 1
+    Generic labeling rules that match Kalshi website buckets:
+      - floor=None, cap=X      -> (X-1) or below
+      - floor=A, cap=B         -> A to B
+      - floor=X, cap=None      -> (X+1) or above
 
     Returns:
-      (display_floor_for_mid_high, display_cap_for_mid, display_cap_for_open_low)
+      label, strike_for_ui_target, cap_for_bust_check
     """
-    eps = 1e-6
-    display_floor = None if floor_raw is None else int(math.floor(float(floor_raw)) + 1)
-    display_cap_mid = None if cap_raw is None else int(math.floor(float(cap_raw)))
-    display_cap_openlow = None if cap_raw is None else int(math.floor(float(cap_raw) - eps))
-    return display_floor, display_cap_mid, display_cap_openlow
+    if cap_raw is not None and floor_raw is None:
+        cap_i = int(round(float(cap_raw)))
+        label = f"{cap_i - 1}° or below"
+        strike = float(cap_i - 1)
+        cap_for_bust = float(cap_i - 1)
+        return label, strike, cap_for_bust
 
+    if floor_raw is not None and cap_raw is not None:
+        a = int(round(float(floor_raw)))
+        b = int(round(float(cap_raw)))
+        label = f"{a}° - {b}°"
+        # Use cap as the “target” value (matches your URL pattern and selection UI)
+        strike = float(b)
+        cap_for_bust = float(b)
+        return label, strike, cap_for_bust
 
-def format_kalshi_label(
-    display_floor: Optional[int], display_cap_mid: Optional[int], display_cap_openlow: Optional[int]
-) -> str:
-    if display_floor is None and display_cap_openlow is not None:
-        return f"{display_cap_openlow}° or below"
-    if display_cap_mid is None and display_floor is not None:
-        return f"{display_floor}° or above"
-    if display_floor is not None and display_cap_mid is not None:
-        return f"{display_floor}° - {display_cap_mid}°"
-    return "Unknown"
+    if floor_raw is not None and cap_raw is None:
+        a = int(round(float(floor_raw))) + 1
+        label = f"{a}° or above"
+        strike = float(a)
+        cap_for_bust = None
+        return label, strike, cap_for_bust
+
+    return "Unknown", float("nan"), None
 
 
 @st.cache_data(ttl=5)
 def fetch_market_data() -> Tuple[List[Dict[str, Any]], str]:
-    # cryptography is required for Kalshi signing
     try:
         from cryptography.hazmat.primitives import serialization  # noqa: F401
     except Exception:
@@ -282,26 +289,15 @@ def fetch_market_data() -> Tuple[List[Dict[str, Any]], str]:
             floor_f = float(floor_raw) if floor_raw is not None else None
             cap_f = float(cap_raw) if cap_raw is not None else None
 
-            # Sort: open-low first, then by increasing floor, open-high last
-            if floor_f is None and cap_f is not None:
-                sort_key = -1_000_000 + cap_f
-            elif floor_f is not None:
-                sort_key = floor_f
-            else:
-                sort_key = 1_000_000
+            label, strike, cap_for_bust = kalshi_label_and_strike(floor_f, cap_f)
 
-            display_floor, display_cap_mid, display_cap_openlow = kalshi_bounds_for_display(floor_f, cap_f)
-            label = format_kalshi_label(display_floor, display_cap_mid, display_cap_openlow)
-
-            # Strike used for UI selection:
-            # - open-low: use displayed cap (e.g., 76)
-            # - middle/open-high: use displayed floor (e.g., 81, 85)
+            # Sort: open-low first, then mid by strike, open-high last
             if floor_f is None and cap_f is not None:
-                strike = float(display_cap_openlow) if display_cap_openlow is not None else float("nan")
-                cap_for_bust = float(display_cap_openlow) if display_cap_openlow is not None else None
+                sort_key = -1_000_000 + (cap_f - 0.5)
+            elif floor_f is not None and cap_f is not None:
+                sort_key = strike
             else:
-                strike = float(display_floor) if display_floor is not None else float("nan")
-                cap_for_bust = float(display_cap_mid) if display_cap_mid is not None else None  # None for open-high
+                sort_key = 1_000_000 + strike
 
             parsed.append(
                 {
@@ -310,8 +306,7 @@ def fetch_market_data() -> Tuple[List[Dict[str, Any]], str]:
                     "price": ask,
                     "floor_raw": floor_f,
                     "cap_raw": cap_f,
-                    "floor": display_floor,
-                    "cap": cap_for_bust,
+                    "cap_for_bust": cap_for_bust,
                     "sort": sort_key,
                 }
             )
@@ -365,7 +360,7 @@ def fetch_forecast_data() -> Dict[str, Any]:
         logger.exception("NWS forecast error")
         data["status"].append("NWS forecast error")
 
-    # HRRR via Open-Meteo: match by local date+hour (fixes 0 W/m² from wrong index)
+    # HRRR via Open-Meteo: pick nearest time, then daytime window max for radiation
     try:
         r = safe_get(OM_API_URL, timeout=5)
         if r.status_code == 200:
@@ -374,49 +369,57 @@ def fetch_forecast_data() -> Dict[str, Any]:
             times = h.get("time", [])
 
             if times:
-                now_local = get_miami_time().replace(minute=0, second=0, microsecond=0)
-                target_date = now_local.date()
-                target_hour = now_local.hour
+                now_local = get_miami_time()
+                best_i = 0
+                best_delta = None
 
-                best_i = None
                 for i, t in enumerate(times):
                     dt = parse_iso_time(t)
                     if dt is None:
                         continue
-                    # Open-Meteo with timezone=America/New_York often returns naive local times
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=TZ_MIAMI)
                     dt_local = dt.astimezone(TZ_MIAMI)
-                    if dt_local.date() == target_date and dt_local.hour == target_hour:
+                    delta = abs((dt_local - now_local).total_seconds())
+                    if best_delta is None or delta < best_delta:
+                        best_delta = delta
                         best_i = i
-                        break
-
-                # Fallback: nearest
-                if best_i is None:
-                    best_i = 0
-                    best_delta = None
-                    for i, t in enumerate(times):
-                        dt = parse_iso_time(t)
-                        if dt is None:
-                            continue
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=TZ_MIAMI)
-                        dt_local = dt.astimezone(TZ_MIAMI)
-                        delta = abs((dt_local - now_local).total_seconds())
-                        if best_delta is None or delta < best_delta:
-                            best_delta = delta
-                            best_i = i
 
                 def at(arr, idx):
-                    if not isinstance(arr, list) or idx >= len(arr):
+                    if not isinstance(arr, list) or idx < 0 or idx >= len(arr):
                         return None
                     return arr[idx]
 
+                rad_arr = h.get("shortwave_radiation", [])
+                precip_arr = h.get("precipitation_probability", [])
+                temp_arr = h.get("temperature_2m", [])
+                cloud_arr = h.get("cloud_cover", [])
+
+                rad = at(rad_arr, best_i)
+                precip = at(precip_arr, best_i)
+                temp_c = at(temp_arr, best_i)
+                cloud = at(cloud_arr, best_i)
+
+                # If rad looks suspiciously low during daytime, take max from a small neighborhood.
+                # (This fixes the common 1-hour alignment issue without hardcoding.)
+                try:
+                    hour_local = now_local.hour
+                    if rad is not None and float(rad) <= 1.0 and 9 <= hour_local <= 16:
+                        candidates = []
+                        for j in range(best_i - 2, best_i + 3):
+                            v = at(rad_arr, j)
+                            if v is not None:
+                                candidates.append(float(v))
+                        if candidates:
+                            rad = max(candidates)
+                except Exception:
+                    pass
+
                 data["hrrr_now"] = {
-                    "rad": at(h.get("shortwave_radiation", []), best_i),
-                    "precip": at(h.get("precipitation_probability", []), best_i),
-                    "temp_c": at(h.get("temperature_2m", []), best_i),
-                    "cloud": at(h.get("cloud_cover", []), best_i),
+                    "rad": rad,
+                    "precip": precip,
+                    "temp_c": temp_c,
+                    "cloud": cloud,
                     "time": times[best_i],
                     "index": best_i,
                 }
@@ -441,7 +444,6 @@ def fetch_forecast_data() -> Dict[str, Any]:
 # LIVE OBSERVATIONS (NWS station obs + METAR), with dedupe
 # =============================================================================
 def _metar_month_rollover(dt: datetime, now_utc: datetime) -> datetime:
-    # If parsed METAR timestamp looks in the future (month boundary), roll back a month.
     if dt > now_utc + timedelta(hours=2):
         first = datetime(now_utc.year, now_utc.month, 1, tzinfo=timezone.utc)
         prev_last = first - timedelta(days=1)
@@ -457,7 +459,6 @@ def _bucket_key(dt: datetime, minutes: int = 5) -> Tuple[int, int, int, int, int
 
 
 def _source_priority(src: str) -> int:
-    # Prefer METAR over NWS when deduping
     return {"AWC": 0, "NWS": 1}.get(src, 9)
 
 
@@ -502,7 +503,6 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
                     dt = dt.replace(tzinfo=timezone.utc)
                 dt_utc = dt.astimezone(timezone.utc)
 
-                # Wind (NWS windSpeed usually m/s)
                 wdir = (p.get("windDirection") or {}).get("value")
                 wspd = (p.get("windSpeed") or {}).get("value")
                 w_str = "--"
@@ -587,7 +587,6 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
                     if wd.isdigit():
                         w_val = int(wd)
 
-                # Cloud amount (simple)
                 sky = "CLR"
                 if "OVC" in line:
                     sky = "OVC"
@@ -598,7 +597,6 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
                 elif "FEW" in line:
                     sky = "FEW"
 
-                # Simple wx token detection
                 wx = None
                 if re.search(r"\bTS\b", line):
                     wx = "TS"
@@ -684,7 +682,6 @@ def get_agent_analysis(
     confidence = 50
     sentiment = "NEUTRAL"
 
-    # Diurnal
     if current_hour < 11:
         reasons.append("Morning ramp")
         confidence += 20
@@ -695,7 +692,6 @@ def get_agent_analysis(
         reasons.append("Late day")
         confidence -= 15
 
-    # Solar / precip
     if rad_watts is not None:
         if rad_watts >= 700:
             reasons.append("Strong sun")
@@ -710,7 +706,6 @@ def get_agent_analysis(
         reasons.append("Rain risk")
         confidence -= 10
 
-    # Moisture
     dew_dep = temp_f - dew_f
     if dew_dep < 3:
         reasons.append("Near-saturated air")
@@ -720,7 +715,6 @@ def get_agent_analysis(
         reasons.append("Drier air")
         confidence += 8
 
-    # Wind
     if 0 <= wind_dir <= 180:
         reasons.append("Ocean breeze bias")
         confidence -= 8
@@ -728,7 +722,6 @@ def get_agent_analysis(
         reasons.append("Land breeze bias")
         confidence += 5
 
-    # Trend
     if trend_f_per_hr > 0.7:
         reasons.append("Fast rise")
         confidence += 12
@@ -793,12 +786,10 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     latest = history[0]
     now_miami = get_miami_time()
 
-    # Day high
     today_recs = [x for x in history if x["dt_utc"].astimezone(TZ_MIAMI).date() == now_miami.date()]
     high_mark = max(today_recs, key=lambda x: x["Temp"]) if today_recs else latest
     high_round = int(round(high_mark["Temp"]))
 
-    # HRRR now
     hrrr_rad = None
     hrrr_precip = None
     if f_data.get("hrrr_now"):
@@ -828,7 +819,6 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         current_hour=now_miami.hour,
     )
 
-    # Bust / ITM logic
     ref_msg = None
     if bracket_cap is not None and high_round > bracket_cap:
         ai_conf = 0
@@ -838,7 +828,6 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         ai_conf = max(0, ai_conf - 40)
         ref_msg = "⚠️ ITM already, but conditions still support further heating."
 
-    # Forecast high (NWS daytime period)
     forecast_high = high_round
     if f_data.get("today_daily"):
         nws_high = f_data["today_daily"].get("temperature")
@@ -848,11 +837,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric(
-        "Temp",
-        "%.2f°F" % latest["Temp"],
-        "Feels %.0f°" % calculate_heat_index(latest["Temp"], latest["Hum"]),
-    )
+    c1.metric("Temp", "%.2f°F" % latest["Temp"], "Feels %.0f°" % calculate_heat_index(latest["Temp"], latest["Hum"]))
     c2.metric("Proj. High", "%d°F" % forecast_high, "NWS daytime", delta_color="off")
     c3.metric("Day High", "%.2f°F" % high_mark["Temp"], "Rounded %d°F" % high_round, delta_color="off")
     c4.metric("Solar (HRRR)", "—" if hrrr_rad is None else "%d W/m²" % int(round(hrrr_rad)))
@@ -875,53 +860,6 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     edge = ai_conf - (live_price or 0)
     m2.metric("Kalshi (%s)" % bracket_label, "%d¢" % live_price, "%+d%% Edge" % int(round(edge)), delta_color="off")
 
-    # Next 3 hours projection (simple)
-    next_3_hours = []
-    current_utc = datetime.now(timezone.utc)
-    for p in f_data.get("all_hourly", []):
-        p_dt = parse_iso_time(p.get("startTime"))
-        if p_dt and p_dt.tzinfo is None:
-            p_dt = p_dt.replace(tzinfo=timezone.utc)
-        if p_dt and p_dt.astimezone(timezone.utc) > current_utc:
-            next_3_hours.append(p)
-            if len(next_3_hours) >= 3:
-                break
-
-    if len(next_3_hours) < 3:
-        proj_str = "⚠️ Forecast Unavailable"
-    else:
-        proj_vals = []
-        curr_temp = latest["Temp"]
-        for i, f in enumerate(next_3_hours):
-            try:
-                nws_temp = float(f.get("temperature"))
-            except Exception:
-                nws_temp = curr_temp
-
-            trend_weight = 0.45 / (i + 1)
-            model_weight = 1.0 - trend_weight
-            raw_proj = (curr_temp + (safe_trend * (i + 1))) * trend_weight + (nws_temp * model_weight)
-
-            if 0 <= latest["WindVal"] <= 180:
-                raw_proj -= 0.4 * (i + 1)
-
-            icon = "☁️"
-            sf = f.get("shortForecast", "") or ""
-            if "Rain" in sf or "Thunder" in sf:
-                icon = "🌧️"
-            elif "Sunny" in sf or "Clear" in sf:
-                icon = "☀️"
-
-            proj_vals.append("**+%dh:** %.1f°F %s" % (i + 1, raw_proj, icon))
-        proj_str = " | ".join(proj_vals)
-
-    st.success("**🔮 AI PROJECTION:** %s" % proj_str)
-
-    # TAF display
-    if f_data.get("taf_raw"):
-        st.caption("TAF (AWC)")
-        st.code(f_data["taf_raw"], language="text")
-
     # Markets buttons
     st.subheader("🎯 Select Bracket (Live Markets)")
     markets, m_status = fetch_market_data()
@@ -932,7 +870,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         cols = st.columns(len(markets))
         for i, m in enumerate(markets):
             label = "%s\n(%d¢)" % (m["label"], m["price"])
-            is_selected = (not math.isnan(m["strike"])) and (float(m["strike"]) == float(target_temp))
+            is_selected = (not is_nan(m["strike"])) and (float(m["strike"]) == float(target_temp))
             if cols[i].button(label, key="mkt_%d" % i, type="primary" if is_selected else "secondary"):
                 st.query_params["target"] = str(m["strike"])
                 st.rerun()
@@ -982,7 +920,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
 
     st.table(pd.DataFrame(clean_rows))
 
-    # Debug panel (helpful if brackets or solar still odd)
+    # Debug
     with st.expander("Debug", expanded=False):
         st.write("Selected target:", target_temp)
         if f_data.get("hrrr_now"):
@@ -998,7 +936,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
                             "price": m["price"],
                             "floor_raw": m.get("floor_raw"),
                             "cap_raw": m.get("cap_raw"),
-                            "cap_for_bust": m.get("cap"),
+                            "cap_for_bust": m.get("cap_for_bust"),
                         }
                         for m in markets
                     ]
@@ -1061,14 +999,13 @@ def main() -> None:
     if auto:
         render_autorefresh(10)
 
-    # Resolve selected market label/price/cap
     markets, _ = fetch_market_data()
     lbl, price, cap = "Target", 0, None
     for m in markets:
-        if (not math.isnan(m["strike"])) and float(m["strike"]) == float(tgt):
+        if (not is_nan(m["strike"])) and float(m["strike"]) == float(tgt):
             lbl = m["label"]
-            price = m["price"]
-            cap = m.get("cap")  # integer cap for bust checks (None for open-high)
+            price = int(m["price"])
+            cap = m.get("cap_for_bust")
             break
 
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
