@@ -30,34 +30,20 @@ AWC_METAR_URL = "https://aviationweather.gov/api/data/metar?ids=KMIA&format=raw&
 NWS_POINT_URL = "https://api.weather.gov/points/25.7906,-80.3164"
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
+# New: Open-Meteo (HRRR Model)
+OM_API_URL = "https://api.open-meteo.com/v1/forecast?latitude=25.7906&longitude=-80.3164&hourly=temperature_2m,precipitation_probability,shortwave_radiation,cloud_cover&timezone=America%2FNew_York&forecast_days=1&models=hrrr_north_america"
 
-# --- GLOBAL STYLES (MOBILE OPTIMIZED) ---
+# --- GLOBAL STYLES ---
 HIDE_INDEX_CSS = """
     <style>
-    /* Desktop Defaults */
     thead tr th:first-child {display:none}
     tbody th {display:none}
     div.stButton > button {width: 100%;}
-    
-    /* MOBILE OPTIMIZATION */
     @media (max-width: 640px) {
-        [data-testid="column"] {
-            width: 50% !important;
-            flex: 0 0 50% !important;
-            min-width: 0 !important;
-            padding: 0 0.2rem !important;
-        }
-        .block-container {
-            padding-top: 1rem !important;
-            padding-bottom: 2rem !important;
-        }
+        [data-testid="column"] {width: 50% !important; flex: 0 0 50% !important; min-width: 0 !important; padding: 0 0.2rem !important;}
+        .block-container {padding-top: 1rem !important; padding-bottom: 2rem !important;}
         [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
-        [data-testid="stMetricLabel"] {
-            font-size: 0.8rem !important;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
+        [data-testid="stMetricLabel"] { font-size: 0.8rem !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         header {visibility: hidden;}
     }
     </style>
@@ -89,7 +75,7 @@ class KalshiAuth:
         )
         return base64.b64encode(signature).decode('utf-8')
 
-# --- SMART MARKET FETCHER (TURBO) ---
+# --- SMART MARKET FETCHER ---
 @st.cache_data(ttl=5)
 def fetch_market_data():
     if not CRYPTO_AVAILABLE: return [], "🔴 Crypto Lib Missing"
@@ -163,7 +149,7 @@ def fetch_market_data():
 
 # --- UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v56_dual_sensor, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v57_hrrr, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -200,20 +186,25 @@ def calculate_heat_index(temp_f, humidity):
     hi = c1 + (c2 * T) + (c3 * R) + (c4 * T * R) + (c5 * T**2) + (c6 * R**2) + (c7 * T**2 * R) + (c8 * T * R**2) + (c9 * T**2 * R**2)
     return hi
 
-# --- AI AGENT ---
-def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, press_in):
+# --- AI AGENT (ENHANCED WITH HRRR) ---
+def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, press_in, rad_watts, precip_prob):
     reasons = []
     sentiment = "NEUTRAL"
     confidence = 50 
     
+    # 1. Solar Physics (HRRR GHI)
     if solar_min <= 0:
         reasons.append("Night mode")
         sentiment = "BEARISH"
         confidence = 20
-    elif solar_min < 120:
-        reasons.append("Low solar angle")
-        confidence = 40
+    elif rad_watts > 700:
+        reasons.append(f"High Solar Energy ({int(rad_watts)} W/m²)")
+        confidence += 15
+    elif rad_watts < 200 and solar_min > 60:
+        reasons.append("Thick Clouds Blocking Sun")
+        confidence -= 15
         
+    # 2. Dew Point Physics
     dew_depression = temp_f - dew_f
     if dew_depression < 3:
         reasons.append("Air Saturated")
@@ -223,14 +214,13 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, pres
         reasons.append("Dry Air (Heating Possible)")
         confidence += 10
         
-    if hum > 85:
-        reasons.append("High Humidity")
-        if trend > 1.0: 
-            reasons.append("⚠️ RALLY SUSPECT")
-            sentiment = "TRAP"
-            confidence = 15
-    elif hum < 50: confidence += 5 
-    
+    # 3. Precip Risk (Radar Data)
+    if precip_prob > 30:
+        reasons.append(f"Rain Risk {precip_prob}%")
+        sentiment = "BEARISH"
+        confidence = 25
+        
+    # 4. Wind Physics
     if 0 <= wind_dir <= 180:
         reasons.append("Ocean Breeze (Cooling)")
         if sentiment == "NEUTRAL": confidence = 30
@@ -238,14 +228,8 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, pres
         reasons.append("Land Breeze (Warming)")
         if sentiment == "NEUTRAL": confidence = 60
         
-    if "OVC" in sky or "BKN" in sky:
-        reasons.append("Clouds")
-        if sentiment != "TRAP": sentiment = "BEARISH"
-        confidence -= 10
-    elif "CLR" in sky or "FEW" in sky:
-        if solar_min > 120:
-            reasons.append("Clear Skies")
-            if sentiment == "NEUTRAL": sentiment = "BULLISH"; confidence = 85
+    # 5. Pressure
+    if press_in > 30.05: confidence += 5
 
     confidence = max(1, min(99, confidence))
     if not reasons: reasons.append("Nominal.")
@@ -255,7 +239,6 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, pres
 # --- FETCHERS ---
 def fetch_live_history():
     data_list = []
-    # 1. NWS FEED
     try:
         r = requests.get(NWS_API_HISTORY, headers=get_headers(), timeout=4)
         if r.status_code == 200:
@@ -277,7 +260,6 @@ def fetch_live_history():
                 w_str = f"{int(wdir):03d} @ {int(wspd/1.852)}kt" if wdir and wspd else "--"
                 clouds = props.get('cloudLayers', [])
                 sky_str = clouds[0].get('amount', '--') if clouds else "--"
-                
                 data_list.append({
                     "dt_utc": dt_utc,
                     "Source": "NWS",
@@ -292,52 +274,37 @@ def fetch_live_history():
                 })
     except: pass
 
-    # 2. AWC FEED (RESTORED)
     try:
         r = requests.get(AWC_METAR_URL, timeout=4)
         for line in r.text.split('\n'):
             if "KMIA" in line:
-                # Regex Parse: KMIA 241553Z ... 27/20 A3013
                 time_match = re.search(r"\b(\d{2})(\d{4})Z\b", line)
                 temp_match = re.search(r"\b(M?\d{2})/(M?\d{2})\b", line)
                 press_match = re.search(r"\bA(\d{4})\b", line)
                 wind_match = re.search(r"\b(\d{3}|VRB)(\d{2,3})G?(\d{2,3})?KT\b", line)
-                
                 if time_match and temp_match:
                     day, tm = int(time_match.group(1)), time_match.group(2)
-                    # Date Logic
                     now = datetime.now(timezone.utc)
                     month, year = now.month, now.year
                     if now.day < 5 and day > 25: month -= 1
                     if month == 0: month, year = 12, year - 1
                     dt_utc = datetime(year, month, day, int(tm[:2]), int(tm[2:]), tzinfo=timezone.utc)
-                    
-                    # Temp/Dew
                     t_str, d_str = temp_match.group(1), temp_match.group(2)
                     def parse_t(s): return -int(s[1:]) if 'M' in s else int(s)
                     tc, dc = parse_t(t_str), parse_t(d_str)
                     tf, df = (tc * 1.8) + 32, (dc * 1.8) + 32
-                    
-                    # Pressure
                     press_in = float(press_match.group(1))/100.0 if press_match else 0.0
-                    
-                    # Wind
                     w_str = "--"
                     w_val = -1
                     if wind_match:
                         w_str = f"{wind_match.group(1)} @ {wind_match.group(2)}kt"
                         if wind_match.group(1).isdigit(): w_val = int(wind_match.group(1))
-                        
-                    # Sky (Simple)
                     sky = "CLR"
                     if "OVC" in line: sky = "OVC"
                     elif "BKN" in line: sky = "BKN"
                     elif "SCT" in line: sky = "SCT"
                     elif "FEW" in line: sky = "FEW"
-
-                    # Calc Hum
                     hum = 100 * (math.exp((17.625*dc)/(243.04+dc))/math.exp((17.625*tc)/(243.04+tc)))
-
                     data_list.append({
                         "dt_utc": dt_utc,
                         "Source": "AWC",
@@ -351,12 +318,11 @@ def fetch_live_history():
                         "Press": press_in
                     })
     except: pass
-    
     return sorted(data_list, key=lambda x: x['dt_utc'], reverse=True)
 
 @st.cache_data(ttl=300)
 def fetch_forecast_data():
-    data = {"today_daily": None, "today_hourly": [], "tomorrow_daily": None, "tomorrow_hourly": [], "taf": None, "all_hourly": []}
+    data = {"today_daily": None, "today_hourly": [], "tomorrow_daily": None, "tomorrow_hourly": [], "taf": None, "all_hourly": [], "hrrr_now": None}
     try:
         r = requests.get(NWS_POINT_URL, headers=get_headers(), timeout=5)
         if r.status_code == 200:
@@ -373,6 +339,20 @@ def fetch_forecast_data():
                 data["all_hourly"] = r_h.json().get('properties', {}).get('periods', [])
         r_t = requests.get(AWC_TAF_URL, timeout=5)
         if r_t.status_code == 200: data["taf"] = r_t.text
+        
+        # --- NEW: HRRR FETCH ---
+        r_om = requests.get(OM_API_URL, timeout=3)
+        if r_om.status_code == 200:
+            hrrr = r_om.json().get('hourly', {})
+            # Get current hour index
+            current_hour = datetime.now().hour
+            # Extract basic params
+            data["hrrr_now"] = {
+                "rad": hrrr['shortwave_radiation'][current_hour],
+                "precip": hrrr['precipitation_probability'][current_hour],
+                "temp": hrrr['temperature_2m'][current_hour],
+                "cloud": hrrr['cloud_cover'][current_hour]
+            }
     except: pass
     return data
 
@@ -438,8 +418,15 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
     if wind_dir == -1:
         for h in history[1:5]:
             if h.get('WindVal', -1) != -1: wind_dir = h['WindVal']; break
+    
+    # HRRR Data Extraction
+    hrrr_rad = 0
+    hrrr_precip = 0
+    if f_data['hrrr_now']:
+        hrrr_rad = f_data['hrrr_now']['rad']
+        hrrr_precip = f_data['hrrr_now']['precip']
                 
-    ai_sent, ai_reason, ai_conf = get_agent_analysis(safe_trend, hum, wind_dir, solar_min, latest['Sky'], dew, latest['Temp'], press)
+    ai_sent, ai_reason, ai_conf = get_agent_analysis(safe_trend, hum, wind_dir, solar_min, latest['Sky'], dew, latest['Temp'], press, hrrr_rad, hrrr_precip)
 
     # Referee Logic
     referee_msg = None
@@ -459,7 +446,7 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
     with c1: st.metric("Temp", f"{latest['Temp']:.2f}°F", f"Feels {feels_like:.1f}°")
     with c2: st.metric("Proj. High", f"{forecast_high}°F", "Forecast", delta_color="off")
     with c3: st.metric("Day High", f"{high_mark['Temp']:.2f}°F", f"Official: {high_round}°F", delta_color="off")
-    with c4: st.metric("Solar", solar_fuel)
+    with c4: st.metric("Solar (HRRR)", f"{hrrr_rad} W/m²")
 
     st.markdown("---")
     m_col1, m_col2 = st.columns([2, 1])
