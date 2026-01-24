@@ -132,7 +132,7 @@ def fetch_market_data():
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v50_physics, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v52_pressure, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -155,7 +155,6 @@ def get_display_time(dt_utc):
 
 # --- ADVANCED PHYSICS ENGINE ---
 def calculate_heat_index(temp_f, humidity):
-    """Calculates 'Feels Like' temperature."""
     if temp_f < 80: return temp_f 
     c1 = -42.379
     c2 = 2.04901523
@@ -171,40 +170,39 @@ def calculate_heat_index(temp_f, humidity):
     hi = c1 + (c2 * T) + (c3 * R) + (c4 * T * R) + (c5 * T**2) + (c6 * R**2) + (c7 * T**2 * R) + (c8 * T * R**2) + (c9 * T**2 * R**2)
     return hi
 
-def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f):
+def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, press_in):
     reasons = []
     sentiment = "NEUTRAL"
     confidence = 50 
     
     # 1. Solar Physics
     if solar_min <= 0:
-        reasons.append("Night mode (No solar fuel)")
+        reasons.append("Night mode")
         sentiment = "BEARISH"
         confidence = 20
     elif solar_min < 120:
-        reasons.append("Low solar angle (<2h left)")
+        reasons.append("Low solar angle")
         confidence = 40
         
-    # 2. Dew Point Physics (New!)
+    # 2. Dew Point Physics
     dew_depression = temp_f - dew_f
     if dew_depression < 3:
         reasons.append("Air Saturated (Heating Capped)")
         sentiment = "TRAP"
         confidence = 10
     elif dew_depression > 10:
-        reasons.append("Dry Air (Rapid Heating Possible)")
+        reasons.append("Dry Air (Heating Possible)")
         confidence += 10
         
-    # 3. Moisture/Humidity
-    if hum > 85:
-        reasons.append("High Humidity (Thermal Buffer)")
-        if trend > 1.0: 
-            reasons.append("⚠️ RALLY SUSPECT")
-            sentiment = "TRAP"
-            confidence = 15
-    elif hum < 50:
-        confidence += 5 # Dry air bonus
-    
+    # 3. Pressure Physics (New!)
+    if press_in > 0:
+        if press_in > 30.00:
+            reasons.append("High Pressure (Clear Skies)")
+            confidence += 5
+        elif press_in < 29.80:
+            reasons.append("Low Pressure (Instability)")
+            confidence -= 5
+            
     # 4. Wind Physics
     if 0 <= wind_dir <= 180:
         reasons.append("Ocean Breeze (Cooling)")
@@ -220,7 +218,7 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f):
         confidence -= 10
     elif "CLR" in sky or "FEW" in sky:
         if solar_min > 120:
-            reasons.append("Clear Skies (Heating)")
+            reasons.append("Clear Skies")
             if sentiment == "NEUTRAL": sentiment = "BULLISH"; confidence = 85
 
     confidence = max(1, min(99, confidence))
@@ -245,6 +243,10 @@ def fetch_live_history():
                 rel_hum = props.get('relativeHumidity', {}).get('value')
                 humidity = rel_hum if rel_hum else 0
                 
+                # Pressure (New!)
+                press_pa = props.get('barometricPressure', {}).get('value')
+                press_in = (press_pa * 0.0002953) if press_pa else 0.0
+                
                 ts = props.get('timestamp')
                 if not ts: continue
                 dt_utc = datetime.fromisoformat(ts.split('+')[0]).replace(tzinfo=timezone.utc)
@@ -264,7 +266,8 @@ def fetch_live_history():
                     "Sky": sky_str,
                     "WindVal": int(wdir) if wdir else -1,
                     "Hum": humidity,
-                    "Dew": dew_f
+                    "Dew": dew_f,
+                    "Press": press_in
                 })
     except: pass
 
@@ -272,7 +275,7 @@ def fetch_live_history():
         r = requests.get(AWC_METAR_URL, timeout=4)
         for line in r.text.split('\n'):
             if "KMIA" in line:
-                # Basic METAR parsing...
+                # Basic METAR parsing could go here for backup
                 pass 
     except: pass
     
@@ -346,6 +349,14 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
     high_round = int(round(high_mark['Temp']))
     smart_trend = calculate_smart_trend(history)
 
+    # --- FORECAST HIGH LOGIC ---
+    forecast_high = high_round # Default to current reality
+    if f_data['today_daily']:
+        nws_high = f_data['today_daily'].get('temperature')
+        # Logic: If current high is higher than forecast, use current. Else use forecast.
+        if nws_high:
+            forecast_high = max(high_round, nws_high)
+
     sunrise_miami = now_miami.replace(hour=7, minute=0, second=0, microsecond=0)
     sunset_miami = now_miami.replace(hour=17, minute=55, second=0, microsecond=0)
     is_night = (now_miami < sunrise_miami or now_miami > sunset_miami)
@@ -362,9 +373,9 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
     safe_trend = smart_trend
     if is_night and safe_trend < -0.5: safe_trend = -0.5
     
-    # Physics Data
     hum = latest.get('Hum', 0)
     dew = latest.get('Dew', 0)
+    press = latest.get('Press', 0)
     feels_like = calculate_heat_index(latest['Temp'], hum)
     
     wind_dir = latest.get('WindVal', -1)
@@ -372,13 +383,14 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
         for h in history[1:5]:
             if h.get('WindVal', -1) != -1: wind_dir = h['WindVal']; break
                 
-    ai_sent, ai_reason, ai_conf = get_agent_analysis(safe_trend, hum, wind_dir, solar_min, latest['Sky'], dew, latest['Temp'])
+    ai_sent, ai_reason, ai_conf = get_agent_analysis(safe_trend, hum, wind_dir, solar_min, latest['Sky'], dew, latest['Temp'], press)
 
     # --- METRICS GRID ---
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.metric("Temp / Heat Index", f"{latest['Temp']:.2f}°F", f"Feels {feels_like:.1f}°")
-    with c2: st.metric("Dew Point", f"{dew:.1f}°F", f"{hum}% Humidity")
-    with c3: st.metric("Day High (Today)", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
+    # c2: Displaying the Forecast High here
+    with c2: st.metric("Proj. High (Today)", f"{forecast_high}°F", "NWS Forecast", delta_color="off")
+    with c3: st.metric("Day High (So Far)", f"{high_mark['Temp']:.2f}°F", f"Officially {high_round}°F", delta_color="off")
     with c4: st.metric("Solar Fuel", solar_fuel)
 
     st.markdown("---")
@@ -443,7 +455,7 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
                 set_target(m['strike'])
                 st.rerun()
 
-    # Sensor Log
+    # Sensor Log (Dew Point Retained Here)
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
     for i, row in enumerate(history[:15]):
@@ -469,8 +481,9 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
             "Src": row['Source'],
             "Condition": f"{icon} {sky_code}",
             "Temp": row['Temp'],
-            "Dew": row['Dew'], # Added Dew
+            "Dew": row['Dew'], 
             "Hum": f"{int(row['Hum'])}%",
+            "Press": f"{row['Press']:.2f}" if row['Press'] > 0 else "--", # New Pressure Column
             "Velocity": vel_str,
             "Wind": row['Wind']
         })
@@ -478,11 +491,11 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
     df = pd.DataFrame(clean_rows)
     df['Temp'] = df['Temp'].apply(lambda x: f"{x:.2f}")
     df['Dew'] = df['Dew'].apply(lambda x: f"{x:.1f}")
-    df = df.rename(columns={"Temp": "Temp (°F)", "Dew": "Dew (°F)"})
+    df = df.rename(columns={"Temp": "Temp (°F)", "Dew": "Dew (°F)", "Press": "Press (inHg)"})
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
     st.table(df)
 
-# --- VIEW: FORECAST RENDERER ---
+# --- VIEW: FORECAST RENDERER (RESTORED) ---
 def render_forecast_generic(daily, hourly, taf, date_label):
     st.title(f"☀️ Helios Forecast: {date_label}")
     if st.button(f"🔄 Refresh {date_label}"): st.cache_data.clear(); st.rerun()
