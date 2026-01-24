@@ -25,23 +25,11 @@ except ImportError:
 st.set_page_config(page_title="Project Helios", page_icon="☀️", layout="wide")
 
 # --- DATA SOURCES (VERIFIED KMIA) ---
-# 1. NWS Station Data (Directly from KMIA Sensor)
 NWS_API_HISTORY = "https://api.weather.gov/stations/KMIA/observations"
-
-# 2. Aviation Weather Center (Pilot METARs for KMIA)
 AWC_METAR_URL = "https://aviationweather.gov/api/data/metar?ids=KMIA&format=raw&hours=12"
-
-# 3. NWS Forecast Grid (Centered on KMIA ASOS Sensor: 25.7954, -80.2901)
 NWS_POINT_URL = "https://api.weather.gov/points/25.7954,-80.2901"
-
-# 4. Aviation TAF (Terminal Aerodrome Forecast for KMIA)
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
-
-# 5. Kalshi Market API
 KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
-
-# 6. Open-Meteo HRRR Model (High-Res Physics)
-# Updated to EXACT KMIA Sensor Coordinates: 25.7954°N, 80.2901°W
 OM_API_URL = "https://api.open-meteo.com/v1/forecast?latitude=25.7954&longitude=-80.2901&hourly=temperature_2m,precipitation_probability,shortwave_radiation,cloud_cover&timezone=America%2FNew_York&forecast_days=1&models=hrrr_north_america"
 
 # --- GLOBAL STYLES ---
@@ -160,7 +148,7 @@ def fetch_market_data():
 
 # --- UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v58_precision, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v59_timezone_fix, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -208,11 +196,11 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, pres
         reasons.append("Night mode")
         sentiment = "BEARISH"
         confidence = 20
-    elif rad_watts > 700:
+    elif rad_watts > 600:
         reasons.append(f"High Solar Energy ({int(rad_watts)} W/m²)")
         confidence += 15
     elif rad_watts < 200 and solar_min > 60:
-        reasons.append("Thick Clouds Blocking Sun")
+        reasons.append(f"Low Solar ({int(rad_watts)} W/m²) - Clouds?")
         confidence -= 15
         
     # 2. Dew Point Physics
@@ -351,16 +339,18 @@ def fetch_forecast_data():
         r_t = requests.get(AWC_TAF_URL, timeout=5)
         if r_t.status_code == 200: data["taf"] = r_t.text
         
-        # --- NEW: HRRR FETCH ---
+        # --- NEW: HRRR FETCH (TIMEZONE FIX) ---
         r_om = requests.get(OM_API_URL, timeout=3)
         if r_om.status_code == 200:
             hrrr = r_om.json().get('hourly', {})
-            current_hour = datetime.now().hour
+            # CRITICAL: Use Miami time index, not server UTC index
+            miami_hour = datetime.now(ZoneInfo("US/Eastern")).hour
+            
             data["hrrr_now"] = {
-                "rad": hrrr['shortwave_radiation'][current_hour],
-                "precip": hrrr['precipitation_probability'][current_hour],
-                "temp": hrrr['temperature_2m'][current_hour],
-                "cloud": hrrr['cloud_cover'][current_hour]
+                "rad": hrrr['shortwave_radiation'][miami_hour],
+                "precip": hrrr['precipitation_probability'][miami_hour],
+                "temp": hrrr['temperature_2m'][miami_hour],
+                "cloud": hrrr['cloud_cover'][miami_hour]
             }
     except: pass
     return data
