@@ -10,6 +10,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple, Any
 
+# Sunrise/Sunset calculation
+from astral import LocationInfo
+from astral.sun import sun
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -1232,6 +1236,14 @@ def main() -> None:
 
     view_mode = st.sidebar.radio("Deck:", ["Live Monitor", "Today's Forecast", "Tomorrow's Forecast"])
     st.sidebar.divider()
+
+    # Sunrise/Sunset calculation for Miami
+    city = LocationInfo(name="Miami", region="USA", timezone="America/New_York", latitude=25.7954, longitude=-80.2901)
+    s = sun(city.observer, date=datetime.now(TZ_MIAMI), tzinfo=TZ_MIAMI)
+    sunrise = s["sunrise"].strftime("%I:%M %p")
+    sunset = s["sunset"].strftime("%I:%M %p")
+    st.sidebar.markdown(f"☀️ **Sunrise:** {sunrise}")
+    st.sidebar.markdown(f"🌙 **Sunset:** {sunset}")
 
     auto = st.sidebar.checkbox("⚡ Auto-Refresh (10s)", value=True)
     if auto:
