@@ -113,6 +113,13 @@ def get_display_time(dt_aware: datetime) -> str:
     return dt_aware.astimezone(TZ_MIAMI).strftime("%I:%M %p")
 
 
+@st.cache_data(ttl=3600)
+def get_sun_times(local_date) -> Tuple[datetime, datetime]:
+    city = LocationInfo(name="Miami", region="USA", timezone="America/New_York", latitude=25.7954, longitude=-80.2901)
+    s = sun(city.observer, date=local_date, tzinfo=TZ_MIAMI)
+    return s["sunrise"], s["sunset"]
+
+
 def c_to_f(c: float) -> float:
     return (c * 1.8) + 32.0
 
@@ -813,6 +820,7 @@ def get_agent_analysis(
     rad_watts: Optional[float],
     precip_prob: Optional[float],
     current_hour: int,
+    is_daylight: bool,
 ) -> Tuple[str, str, int]:
     reasons: List[str] = []
     confidence = 50
@@ -827,6 +835,10 @@ def get_agent_analysis(
     else:
         reasons.append("Late day")
         confidence -= 15
+
+    if not is_daylight:
+        reasons.append("Nighttime cooling")
+        confidence -= 20
 
     if rad_watts is not None:
         if rad_watts >= 700:
@@ -881,7 +893,12 @@ def get_agent_analysis(
 # =============================================================================
 # FORECAST CONFIDENCE (for forecast pages)
 # =============================================================================
-def forecast_trade_confidence(daily_text: str, peak_rad: Optional[float], peak_precip: Optional[float]) -> Tuple[str, int, str]:
+def forecast_trade_confidence(
+    daily_text: str,
+    peak_rad: Optional[float],
+    peak_precip: Optional[float],
+    is_daylight_period: Optional[bool],
+) -> Tuple[str, int, str]:
     """
     Simple day-ahead "trade confidence" score using:
       - daily forecast text keywords
@@ -907,6 +924,10 @@ def forecast_trade_confidence(daily_text: str, peak_rad: Optional[float], peak_p
     if any(k in text for k in ["thunder", "t-storm", "storm"]):
         score -= 20
         reasons.append("Thunder risk")
+
+    if is_daylight_period is False:
+        score -= 10
+        reasons.append("Nighttime cooling")
 
     if peak_rad is not None:
         if peak_rad >= 650:
@@ -1005,6 +1026,9 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     if now_miami.hour > 17 and safe_trend < -0.5:
         safe_trend = -0.5
 
+    sunrise_now, sunset_now = get_sun_times(now_miami.date())
+    is_daylight_now = sunrise_now <= now_miami <= sunset_now
+
     ai_sent, ai_reason, ai_conf = get_agent_analysis(
         trend_f_per_hr=safe_trend,
         wind_dir=latest["WindVal"],
@@ -1013,6 +1037,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         rad_watts=hrrr_rad,
         precip_prob=hrrr_precip,
         current_hour=now_miami.hour,
+        is_daylight=is_daylight_now,
     )
 
     ref_msg = None
@@ -1167,7 +1192,15 @@ def render_forecast_generic(
         peak_rad = peak.get("rad")
         peak_precip = peak.get("precip")
 
-    sent, conf, reasons = forecast_trade_confidence(daily_text, peak_rad, peak_precip)
+    period_time = None
+    if daily and daily.get("startTime"):
+        period_time = parse_iso_time(daily["startTime"])
+    if not period_time:
+        period_time = get_miami_time()
+    sunrise_p, sunset_p = get_sun_times(period_time.astimezone(TZ_MIAMI).date())
+    is_daylight_period = sunrise_p <= period_time.astimezone(TZ_MIAMI) <= sunset_p
+
+    sent, conf, reasons = forecast_trade_confidence(daily_text, peak_rad, peak_precip, is_daylight_period)
 
     gauge_col1, gauge_col2 = st.columns([1, 3])
     with gauge_col1:
@@ -1179,16 +1212,7 @@ def render_forecast_generic(
     # Daily text
     if daily:
         # Use sunrise/sunset to determine if the period is day or night
-        city = LocationInfo(name="Miami", region="USA", timezone="America/New_York", latitude=25.7954, longitude=-80.2901)
-        s = sun(city.observer, date=datetime.now(TZ_MIAMI), tzinfo=TZ_MIAMI)
-        sunrise = s["sunrise"]
-        sunset = s["sunset"]
-        # Try to parse the period's time if available, else fallback to now
-        period_time = None
-        if daily.get("startTime"):
-            period_time = parse_iso_time(daily["startTime"])
-        if not period_time:
-            period_time = datetime.now(TZ_MIAMI)
+        sunrise, sunset = get_sun_times(period_time.astimezone(TZ_MIAMI).date())
         is_night = period_time < sunrise or period_time > sunset
         icon = icon_from_short_forecast(daily.get("shortForecast", "") or "")
         if is_night and icon == "☀️":
@@ -1203,9 +1227,8 @@ def render_forecast_generic(
 
     # Hourly table with icons
     if hourly:
-        # Get sunrise/sunset for today (for each hour, use the date of the forecast hour)
+        # Get sunrise/sunset for each hour's local date
         h_data = []
-        city = LocationInfo(name="Miami", region="USA", timezone="America/New_York", latitude=25.7954, longitude=-80.2901)
         for h in hourly[:24]:
             dt = parse_iso_time(h.get("startTime"))
             if not dt:
@@ -1213,9 +1236,7 @@ def render_forecast_generic(
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             dt_local = dt.astimezone(TZ_MIAMI)
-            s = sun(city.observer, date=dt_local.date(), tzinfo=TZ_MIAMI)
-            sunrise = s["sunrise"]
-            sunset = s["sunset"]
+            sunrise, sunset = get_sun_times(dt_local.date())
             is_night = dt_local < sunrise or dt_local > sunset
 
             sf = h.get("shortForecast", "") or ""
@@ -1261,10 +1282,9 @@ def main() -> None:
     st.sidebar.divider()
 
     # Sunrise/Sunset calculation for Miami
-    city = LocationInfo(name="Miami", region="USA", timezone="America/New_York", latitude=25.7954, longitude=-80.2901)
-    s = sun(city.observer, date=datetime.now(TZ_MIAMI), tzinfo=TZ_MIAMI)
-    sunrise = s["sunrise"].strftime("%I:%M %p")
-    sunset = s["sunset"].strftime("%I:%M %p")
+    sunrise_dt, sunset_dt = get_sun_times(get_miami_time().date())
+    sunrise = sunrise_dt.strftime("%I:%M %p")
+    sunset = sunset_dt.strftime("%I:%M %p")
     st.sidebar.markdown(f"☀️ **Sunrise:** {sunrise}")
     st.sidebar.markdown(f"🌙 **Sunset:** {sunset}")
 
