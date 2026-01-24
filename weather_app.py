@@ -13,6 +13,14 @@ try:
 except ImportError:
     from backports.zoneinfo import ZoneInfo
 
+# --- LIBRARY CHECK ---
+try:
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Project Helios", page_icon="☀️", layout="wide")
 
@@ -295,7 +303,7 @@ def fetch_forecast_data():
     return data
 
 # --- RENDERER ---
-def render_dashboard(target_temp, bracket_label, live_price, bracket_cap):
+def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
     st.title("🔴 Project Helios: Live Feed")
     if st.button("🔄 Refresh System", type="primary"): st.cache_data.clear(); st.rerun()
     
@@ -376,6 +384,7 @@ def render_dashboard(target_temp, bracket_label, live_price, bracket_cap):
             model_weight = 1.0 - trend_weight
             raw_proj = (curr_temp + (safe_trend * (i+1))) * trend_weight + (nws_temp * model_weight)
             if 0 <= wind_dir <= 180: raw_proj -= (0.5 * (i+1))
+            if is_night: raw_proj -= (0.3 * (i+1))
             icon = "🌧️" if "Rain" in f['shortForecast'] else "☁️"
             if "Sunny" in f['shortForecast']: icon = "☀️"
             proj_vals.append(f"**+{i+1}h:** {raw_proj:.1f}°F {icon}")
@@ -401,6 +410,18 @@ def render_dashboard(target_temp, bracket_label, live_price, bracket_cap):
         df['Dew'] = df['Dew'].apply(lambda x: f"{x:.1f}")
         st.table(df[['Time', 'Source', 'Temp', 'Dew', 'Hum', 'Press']])
 
+# --- FORECAST VIEW ---
+def render_forecast_generic(daily, hourly, taf, date_label):
+    st.title(f"Forecast: {date_label}")
+    if st.button(f"🔄 Refresh"): st.cache_data.clear(); st.rerun()
+    if daily: st.success(f"{daily['detailedForecast']}")
+    if hourly:
+        h_data = []
+        for h in hourly:
+            dt = parse_iso_time(h['startTime'])
+            h_data.append({"Time": dt.strftime("%I %p"), "Temp": h['temperature'], "Cond": h['shortForecast'], "Wind": f"{h['windDirection']} {h['windSpeed']}"})
+        st.table(pd.DataFrame(h_data))
+
 # --- MAIN ---
 def main():
     if "target" not in st.query_params: st.query_params["target"] = "81.0"
@@ -417,7 +438,7 @@ def main():
     for m in markets:
         if m['strike'] == tgt: lbl, price, cap = m['label'], m['price'], m['cap']
             
-    if view_mode == "Live Monitor": render_dashboard(tgt, lbl, price, cap)
+    if view_mode == "Live Monitor": render_live_dashboard(tgt, lbl, price, cap)
     else:
         f_data = fetch_forecast_data()
         now = get_miami_time()
