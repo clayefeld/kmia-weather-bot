@@ -67,7 +67,7 @@ def make_session() -> requests.Session:
     s = requests.Session()
     s.headers.update(
         {
-            "User-Agent": "ProjectHelios/1.5 (Streamlit app)",
+            "User-Agent": "ProjectHelios/1.6 (Streamlit app)",
             "Accept": "application/geo+json, application/json;q=0.9, */*;q=0.8",
         }
     )
@@ -142,7 +142,7 @@ def is_nan(x: Any) -> bool:
         return False
 
 
-def condition_icon(sky: str, wx: Optional[str] = None) -> str:
+def condition_icon_from_sky_wx(sky: str, wx: Optional[str] = None) -> str:
     s = (sky or "").upper()
     w = (wx or "").upper()
 
@@ -162,6 +162,25 @@ def condition_icon(sky: str, wx: Optional[str] = None) -> str:
     if s in ("BKN", "OVC"):
         return "☁️"
     return "☁️" if s else "—"
+
+
+def icon_from_short_forecast(text: str) -> str:
+    t = (text or "").lower()
+    if "thunder" in t or "t-storm" in t or "storm" in t:
+        return "⛈️"
+    if "rain" in t or "showers" in t:
+        return "🌧️"
+    if "fog" in t or "haze" in t or "mist" in t:
+        return "🌫️"
+    if "snow" in t or "sleet" in t:
+        return "🌨️"
+    if "sunny" in t or "clear" in t:
+        return "☀️"
+    if "partly" in t and "cloud" in t:
+        return "⛅"
+    if "cloud" in t or "overcast" in t:
+        return "☁️"
+    return "☁️"
 
 
 # =============================================================================
@@ -209,17 +228,19 @@ class KalshiAuth:
 
 
 # =============================================================================
-# KALSHI MARKET FETCHER (GENERIC, MATCHES WEBSITE DAILY)
+# KALSHI MARKET FETCHER (GENERIC)
 # =============================================================================
 def kalshi_label_and_strike(floor_raw: Optional[float], cap_raw: Optional[float]) -> Tuple[str, float, Optional[float]]:
     """
-    Generic labeling rules that match Kalshi website buckets:
+    Generic labeling rules matching Kalshi UI:
       - floor=None, cap=X      -> (X-1) or below
       - floor=A, cap=B         -> A to B
       - floor=X, cap=None      -> (X+1) or above
 
-    Returns:
-      label, strike_for_ui_target, cap_for_bust_check
+    strike_for_ui:
+      - open-low: cap-1
+      - middle: cap  (so selecting 83-84 uses target=84.0)
+      - open-high: floor+1
     """
     if cap_raw is not None and floor_raw is None:
         cap_i = int(round(float(cap_raw)))
@@ -232,7 +253,6 @@ def kalshi_label_and_strike(floor_raw: Optional[float], cap_raw: Optional[float]
         a = int(round(float(floor_raw)))
         b = int(round(float(cap_raw)))
         label = f"{a}° - {b}°"
-        # Use cap as the “target” value (matches your URL pattern and selection UI)
         strike = float(b)
         cap_for_bust = float(b)
         return label, strike, cap_for_bust
@@ -291,7 +311,6 @@ def fetch_market_data() -> Tuple[List[Dict[str, Any]], str]:
 
             label, strike, cap_for_bust = kalshi_label_and_strike(floor_f, cap_f)
 
-            # Sort: open-low first, then mid by strike, open-high last
             if floor_f is None and cap_f is not None:
                 sort_key = -1_000_000 + (cap_f - 0.5)
             elif floor_f is not None and cap_f is not None:
@@ -322,6 +341,65 @@ def fetch_market_data() -> Tuple[List[Dict[str, Any]], str]:
 # =============================================================================
 # FORECAST FETCHER (NWS + HRRR(Open-Meteo) + TAF)
 # =============================================================================
+def _nearest_index_for_local_hour(times: List[str], target_local: datetime) -> Optional[int]:
+    best_i = None
+    best_delta = None
+    for i, t in enumerate(times):
+        dt = parse_iso_time(t)
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ_MIAMI)
+        dt_local = dt.astimezone(TZ_MIAMI)
+        delta = abs((dt_local - target_local).total_seconds())
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best_i = i
+    return best_i
+
+
+def _hrrr_peak_for_date(h: Dict[str, Any], times: List[str], target_date) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Returns (peak_rad, peak_precip) for 09-16 local on the given date.
+    """
+    rad_arr = h.get("shortwave_radiation", []) or []
+    precip_arr = h.get("precipitation_probability", []) or []
+
+    peak_rad = None
+    peak_precip = None
+
+    for i, t in enumerate(times):
+        dt = parse_iso_time(t)
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ_MIAMI)
+        dt_local = dt.astimezone(TZ_MIAMI)
+
+        if dt_local.date() != target_date:
+            continue
+        if not (9 <= dt_local.hour <= 16):
+            continue
+
+        if i < len(rad_arr):
+            try:
+                v = float(rad_arr[i])
+                if peak_rad is None or v > peak_rad:
+                    peak_rad = v
+            except Exception:
+                pass
+
+        if i < len(precip_arr):
+            try:
+                v = float(precip_arr[i])
+                if peak_precip is None or v > peak_precip:
+                    peak_precip = v
+            except Exception:
+                pass
+
+    return peak_rad, peak_precip
+
+
 @st.cache_data(ttl=300)
 def fetch_forecast_data() -> Dict[str, Any]:
     data: Dict[str, Any] = {
@@ -329,6 +407,8 @@ def fetch_forecast_data() -> Dict[str, Any]:
         "tomorrow_daily": None,
         "all_hourly": [],
         "hrrr_now": None,
+        "hrrr_today_peak": None,
+        "hrrr_tomorrow_peak": None,
         "taf_raw": None,
         "status": [],
     }
@@ -360,51 +440,35 @@ def fetch_forecast_data() -> Dict[str, Any]:
         logger.exception("NWS forecast error")
         data["status"].append("NWS forecast error")
 
-    # HRRR via Open-Meteo: pick nearest time, then daytime window max for radiation
+    # HRRR via Open-Meteo
     try:
         r = safe_get(OM_API_URL, timeout=5)
         if r.status_code == 200:
             hrrr = r.json()
             h = hrrr.get("hourly", {})
-            times = h.get("time", [])
-
+            times = h.get("time", []) or []
             if times:
                 now_local = get_miami_time()
-                best_i = 0
-                best_delta = None
-
-                for i, t in enumerate(times):
-                    dt = parse_iso_time(t)
-                    if dt is None:
-                        continue
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=TZ_MIAMI)
-                    dt_local = dt.astimezone(TZ_MIAMI)
-                    delta = abs((dt_local - now_local).total_seconds())
-                    if best_delta is None or delta < best_delta:
-                        best_delta = delta
-                        best_i = i
+                best_i = _nearest_index_for_local_hour(times, now_local)
 
                 def at(arr, idx):
-                    if not isinstance(arr, list) or idx < 0 or idx >= len(arr):
+                    if not isinstance(arr, list) or idx is None or idx < 0 or idx >= len(arr):
                         return None
                     return arr[idx]
 
-                rad_arr = h.get("shortwave_radiation", [])
-                precip_arr = h.get("precipitation_probability", [])
-                temp_arr = h.get("temperature_2m", [])
-                cloud_arr = h.get("cloud_cover", [])
+                rad_arr = h.get("shortwave_radiation", []) or []
+                precip_arr = h.get("precipitation_probability", []) or []
+                temp_arr = h.get("temperature_2m", []) or []
+                cloud_arr = h.get("cloud_cover", []) or []
 
                 rad = at(rad_arr, best_i)
                 precip = at(precip_arr, best_i)
                 temp_c = at(temp_arr, best_i)
                 cloud = at(cloud_arr, best_i)
 
-                # If rad looks suspiciously low during daytime, take max from a small neighborhood.
-                # (This fixes the common 1-hour alignment issue without hardcoding.)
+                # If rad looks too low during daytime, take max in ±2h window
                 try:
-                    hour_local = now_local.hour
-                    if rad is not None and float(rad) <= 1.0 and 9 <= hour_local <= 16:
+                    if best_i is not None and 9 <= now_local.hour <= 16:
                         candidates = []
                         for j in range(best_i - 2, best_i + 3):
                             v = at(rad_arr, j)
@@ -420,9 +484,19 @@ def fetch_forecast_data() -> Dict[str, Any]:
                     "precip": precip,
                     "temp_c": temp_c,
                     "cloud": cloud,
-                    "time": times[best_i],
+                    "time": times[best_i] if best_i is not None else None,
                     "index": best_i,
                 }
+
+                # Peak solar/precip for today & tomorrow (09-16)
+                today = now_local.date()
+                tomorrow = (now_local + timedelta(days=1)).date()
+                peak_rad_today, peak_pp_today = _hrrr_peak_for_date(h, times, today)
+                peak_rad_tmr, peak_pp_tmr = _hrrr_peak_for_date(h, times, tomorrow)
+
+                data["hrrr_today_peak"] = {"rad": peak_rad_today, "precip": peak_pp_today}
+                data["hrrr_tomorrow_peak"] = {"rad": peak_rad_tmr, "precip": peak_pp_tmr}
+
     except Exception:
         logger.exception("HRRR(Open-Meteo) fetch error")
         data["status"].append("HRRR(Open-Meteo) unavailable")
@@ -641,8 +715,65 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
 
 
 # =============================================================================
-# TREND + "AGENT"
+# TREND + VELOCITY (SMOOTHED)
 # =============================================================================
+def linear_regression_slope_f_per_hr(points: List[Dict[str, Any]], anchor_dt: datetime) -> Optional[float]:
+    """
+    Slope in °F/hr using linear regression over points.
+    x = minutes from anchor_dt (older points have negative x if anchor is newest)
+    """
+    if len(points) < 3:
+        return None
+
+    x = []
+    y = []
+    for p in points:
+        dt = p["dt_utc"]
+        minutes = (dt - anchor_dt).total_seconds() / 60.0
+        x.append(minutes)
+        y.append(p["Temp"])
+
+    N = len(x)
+    sum_x = sum(x)
+    sum_y = sum(y)
+    sum_xy = sum(i * j for i, j in zip(x, y))
+    sum_xx = sum(i * i for i in x)
+    den = (N * sum_xx - sum_x * sum_x)
+    if den == 0:
+        return None
+
+    slope_per_min = (N * sum_xy - sum_x * sum_y) / den
+    return slope_per_min * 60.0
+
+
+def compute_smoothed_velocity(history: List[Dict[str, Any]], i: int, window_minutes: int = 30) -> Optional[float]:
+    """
+    Use a regression over ~window_minutes starting at row i and going older.
+    This avoids insane spikes when consecutive points are only 2–5 minutes apart.
+    """
+    if i >= len(history):
+        return None
+    anchor = history[i]["dt_utc"]
+    window = []
+    for j in range(i, len(history)):
+        if (anchor - history[j]["dt_utc"]).total_seconds() / 60.0 <= window_minutes:
+            window.append(history[j])
+        else:
+            break
+
+    slope = linear_regression_slope_f_per_hr(window, anchor_dt=anchor)
+    if slope is not None:
+        return slope
+
+    # Fallback: find a pair at least 10 minutes apart
+    for j in range(i + 1, len(history)):
+        dt2 = history[j]["dt_utc"]
+        diff_hr = (anchor - dt2).total_seconds() / 3600.0
+        if diff_hr >= (10 / 60):
+            return (history[i]["Temp"] - history[j]["Temp"]) / diff_hr
+    return None
+
+
 def calculate_smart_trend(master_list: List[Dict[str, Any]]) -> float:
     if len(master_list) < 2:
         return 0.0
@@ -740,6 +871,66 @@ def get_agent_analysis(
             sentiment = "BEARISH"
 
     return sentiment, " + ".join(reasons), confidence
+
+
+# =============================================================================
+# FORECAST CONFIDENCE (for forecast pages)
+# =============================================================================
+def forecast_trade_confidence(daily_text: str, peak_rad: Optional[float], peak_precip: Optional[float]) -> Tuple[str, int, str]:
+    """
+    Simple day-ahead "trade confidence" score using:
+      - daily forecast text keywords
+      - HRRR peak solar (09-16)
+      - HRRR peak precip (09-16)
+    """
+    text = (daily_text or "").lower()
+    reasons = []
+    score = 55
+
+    if any(k in text for k in ["sunny", "clear"]):
+        score += 15
+        reasons.append("Sunny/clear signal")
+    if "mostly sunny" in text:
+        score += 8
+        reasons.append("Mostly sunny")
+    if any(k in text for k in ["cloudy", "overcast"]):
+        score -= 10
+        reasons.append("Cloud cover risk")
+    if any(k in text for k in ["rain", "showers"]):
+        score -= 15
+        reasons.append("Rain risk")
+    if any(k in text for k in ["thunder", "t-storm", "storm"]):
+        score -= 20
+        reasons.append("Thunder risk")
+
+    if peak_rad is not None:
+        if peak_rad >= 650:
+            score += 10
+            reasons.append(f"Strong peak solar ({int(peak_rad)}W)")
+        elif peak_rad <= 250:
+            score -= 10
+            reasons.append(f"Weak peak solar ({int(peak_rad)}W)")
+    else:
+        reasons.append("HRRR solar unavailable")
+
+    if peak_precip is not None:
+        if peak_precip >= 70:
+            score -= 20
+            reasons.append(f"High precip chance ({int(peak_precip)}%)")
+        elif peak_precip >= 50:
+            score -= 12
+            reasons.append(f"Elevated precip chance ({int(peak_precip)}%)")
+
+    score = max(0, min(100, int(round(score))))
+    sentiment = "NEUTRAL"
+    if score >= 70:
+        sentiment = "BULLISH"
+    elif score <= 35:
+        sentiment = "BEARISH"
+    if any(k in text for k in ["thunder", "t-storm"]) and score < 50:
+        sentiment = "TRAP"
+
+    return sentiment, score, " + ".join(reasons[:5]) if reasons else "—"
 
 
 # =============================================================================
@@ -860,6 +1051,11 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     edge = ai_conf - (live_price or 0)
     m2.metric("Kalshi (%s)" % bracket_label, "%d¢" % live_price, "%+d%% Edge" % int(round(edge)), delta_color="off")
 
+    # TAF display
+    if f_data.get("taf_raw"):
+        st.caption("TAF (AWC)")
+        st.code(f_data["taf_raw"], language="text")
+
     # Markets buttons
     st.subheader("🎯 Select Bracket (Live Markets)")
     markets, m_status = fetch_market_data()
@@ -877,30 +1073,27 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     else:
         st.info("No markets returned for today (ticker may be unavailable yet).")
 
-    # Sensor log (requested columns)
+    # Sensor log (Velocity now smoothed)
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
-    for i, row in enumerate(history[:20]):
-        vel = None
+    for i, row in enumerate(history[:25]):
+        vel = compute_smoothed_velocity(history, i, window_minutes=30)
         vel_arrow = "—"
-        if i < len(history) - 1:
-            dt1, dt2 = row["dt_utc"], history[i + 1]["dt_utc"]
-            diff_hr = (dt1 - dt2).total_seconds() / 3600.0
-            if diff_hr > 0:
-                vel = (row["Temp"] - history[i + 1]["Temp"]) / diff_hr
-                if vel > 0.5:
-                    vel_arrow = "⬆️"
-                elif vel > 0.1:
-                    vel_arrow = "↗️"
-                elif vel < -0.5:
-                    vel_arrow = "⬇️"
-                elif vel < -0.1:
-                    vel_arrow = "↘️"
+        if vel is not None:
+            if vel > 0.5:
+                vel_arrow = "⬆️"
+            elif vel > 0.1:
+                vel_arrow = "↗️"
+            elif vel < -0.5:
+                vel_arrow = "⬇️"
+            elif vel < -0.1:
+                vel_arrow = "↘️"
 
         vel_str = "—" if vel is None else "%+.2f°F/hr %s" % (vel, vel_arrow)
+
         sky = row.get("Sky", "--")
         wx = row.get("Wx")
-        cond = "%s %s" % (condition_icon(sky, wx), sky)
+        cond = "%s %s" % (condition_icon_from_sky_wx(sky, wx), sky)
         hi = calculate_heat_index(row["Temp"], row["Hum"])
 
         clean_rows.append(
@@ -944,19 +1137,52 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
             )
 
 
-def render_forecast_generic(daily: Optional[Dict[str, Any]], hourly: List[Dict[str, Any]], date_label: str) -> None:
+def render_forecast_generic(
+    daily: Optional[Dict[str, Any]],
+    hourly: List[Dict[str, Any]],
+    date_label: str,
+    f_data: Dict[str, Any],
+    which_day: str,  # "today" or "tomorrow"
+) -> None:
     st.title("Forecast: %s" % date_label)
 
     if st.button("🔄 Refresh Forecast"):
         st.cache_data.clear()
         st.rerun()
 
+    # Confidence gauge
+    daily_text = ""
     if daily:
-        st.success(daily.get("detailedForecast", ""))
-        st.caption("NWS Period: %s, Temp: %s°" % (daily.get("name", ""), daily.get("temperature", "")))
+        daily_text = daily.get("detailedForecast", "") or ""
+
+    peak = f_data.get("hrrr_today_peak") if which_day == "today" else f_data.get("hrrr_tomorrow_peak")
+    peak_rad = None
+    peak_precip = None
+    if isinstance(peak, dict):
+        peak_rad = peak.get("rad")
+        peak_precip = peak.get("precip")
+
+    sent, conf, reasons = forecast_trade_confidence(daily_text, peak_rad, peak_precip)
+
+    gauge_col1, gauge_col2 = st.columns([1, 3])
+    with gauge_col1:
+        st.metric("Trade Bias", sent)
+    with gauge_col2:
+        st.progress(conf / 100.0)
+        st.caption(f"Confidence: **{conf}%** — {reasons}")
+
+    # Daily text
+    if daily:
+        icon = icon_from_short_forecast(daily.get("shortForecast", "") or "")
+        st.success(f"{icon} {daily_text}")
+        st.caption(
+            "NWS Period: %s | Temp: %s° | Wind: %s"
+            % (daily.get("name", ""), daily.get("temperature", ""), daily.get("windSpeed", ""))
+        )
     else:
         st.warning("Daily forecast not available for this view.")
 
+    # Hourly table with icons
     if hourly:
         h_data = []
         for h in hourly[:24]:
@@ -966,11 +1192,23 @@ def render_forecast_generic(daily: Optional[Dict[str, Any]], hourly: List[Dict[s
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             dt_local = dt.astimezone(TZ_MIAMI)
+
+            sf = h.get("shortForecast", "") or ""
+            icon = icon_from_short_forecast(sf)
+
+            pop = None
+            try:
+                pop_val = (h.get("probabilityOfPrecipitation") or {}).get("value")
+                pop = None if pop_val is None else int(round(float(pop_val)))
+            except Exception:
+                pop = None
+
             h_data.append(
                 {
                     "Time": dt_local.strftime("%a %I %p"),
+                    "Cond": f"{icon} {sf}",
                     "Temp": h.get("temperature"),
-                    "Cond": h.get("shortForecast"),
+                    "PoP": "—" if pop is None else f"{pop}%",
                     "Wind": "%s %s" % (h.get("windDirection", ""), h.get("windSpeed", "")),
                 }
             )
@@ -1021,6 +1259,8 @@ def main() -> None:
                 daily=f_data.get("today_daily"),
                 hourly=f_data.get("all_hourly", []),
                 date_label=now.strftime("%A"),
+                f_data=f_data,
+                which_day="today",
             )
         else:
             tomorrow = (now + timedelta(days=1)).date()
@@ -1038,6 +1278,8 @@ def main() -> None:
                 daily=f_data.get("tomorrow_daily"),
                 hourly=hourly if hourly else (f_data.get("all_hourly") or []),
                 date_label=(now + timedelta(days=1)).strftime("%A"),
+                f_data=f_data,
+                which_day="tomorrow",
             )
 
 
