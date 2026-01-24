@@ -170,6 +170,7 @@ def condition_icon_from_sky_wx(sky: str, wx: Optional[str] = None) -> str:
 
 def icon_from_short_forecast(text: str) -> str:
     t = (text or "").lower()
+    # This function will be wrapped for day/night context
     if "thunder" in t or "t-storm" in t or "storm" in t:
         return "⛈️"
     if "rain" in t or "showers" in t:
@@ -179,7 +180,7 @@ def icon_from_short_forecast(text: str) -> str:
     if "snow" in t or "sleet" in t:
         return "🌨️"
     if "sunny" in t or "clear" in t:
-        return "☀️"
+        return "☀️"  # Will be replaced with moon at night
     if "partly" in t and "cloud" in t:
         return "⛅"
     if "cloud" in t or "overcast" in t:
@@ -1177,7 +1178,21 @@ def render_forecast_generic(
 
     # Daily text
     if daily:
+        # Use sunrise/sunset to determine if the period is day or night
+        city = LocationInfo(name="Miami", region="USA", timezone="America/New_York", latitude=25.7954, longitude=-80.2901)
+        s = sun(city.observer, date=datetime.now(TZ_MIAMI), tzinfo=TZ_MIAMI)
+        sunrise = s["sunrise"]
+        sunset = s["sunset"]
+        # Try to parse the period's time if available, else fallback to now
+        period_time = None
+        if daily.get("startTime"):
+            period_time = parse_iso_time(daily["startTime"])
+        if not period_time:
+            period_time = datetime.now(TZ_MIAMI)
+        is_night = period_time < sunrise or period_time > sunset
         icon = icon_from_short_forecast(daily.get("shortForecast", "") or "")
+        if is_night and icon == "☀️":
+            icon = "🌙"
         st.success(f"{icon} {daily_text}")
         st.caption(
             "NWS Period: %s | Temp: %s° | Wind: %s"
@@ -1188,7 +1203,9 @@ def render_forecast_generic(
 
     # Hourly table with icons
     if hourly:
+        # Get sunrise/sunset for today (for each hour, use the date of the forecast hour)
         h_data = []
+        city = LocationInfo(name="Miami", region="USA", timezone="America/New_York", latitude=25.7954, longitude=-80.2901)
         for h in hourly[:24]:
             dt = parse_iso_time(h.get("startTime"))
             if not dt:
@@ -1196,9 +1213,15 @@ def render_forecast_generic(
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             dt_local = dt.astimezone(TZ_MIAMI)
+            s = sun(city.observer, date=dt_local.date(), tzinfo=TZ_MIAMI)
+            sunrise = s["sunrise"]
+            sunset = s["sunset"]
+            is_night = dt_local < sunrise or dt_local > sunset
 
             sf = h.get("shortForecast", "") or ""
             icon = icon_from_short_forecast(sf)
+            if is_night and icon == "☀️":
+                icon = "🌙"
 
             pop = None
             try:
