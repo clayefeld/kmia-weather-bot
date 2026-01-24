@@ -6,6 +6,7 @@ import base64
 import time
 import pandas as pd
 import math
+import re
 from datetime import datetime, timedelta, timezone 
 try:
     from zoneinfo import ZoneInfo
@@ -30,7 +31,7 @@ NWS_POINT_URL = "https://api.weather.gov/points/25.7906,-80.3164"
 AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
-# --- GLOBAL STYLES (MOBILE GRID FIX) ---
+# --- GLOBAL STYLES (MOBILE OPTIMIZED) ---
 HIDE_INDEX_CSS = """
     <style>
     /* Desktop Defaults */
@@ -38,34 +39,25 @@ HIDE_INDEX_CSS = """
     tbody th {display:none}
     div.stButton > button {width: 100%;}
     
-    /* MOBILE OPTIMIZATION (Max Width 640px) */
+    /* MOBILE OPTIMIZATION */
     @media (max-width: 640px) {
-        /* Force 2 columns (50% width) on mobile */
         [data-testid="column"] {
             width: 50% !important;
             flex: 0 0 50% !important;
-            min-width: 0 !important; /* Critical to prevent stacking */
-            padding: 0 0.2rem !important; /* Tighten spacing */
+            min-width: 0 !important;
+            padding: 0 0.2rem !important;
         }
-        
-        /* Reduce top whitespace */
         .block-container {
             padding-top: 1rem !important;
             padding-bottom: 2rem !important;
         }
-        
-        /* Scale down metric text to fit side-by-side */
-        [data-testid="stMetricValue"] {
-            font-size: 1.4rem !important;
-        }
+        [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
         [data-testid="stMetricLabel"] {
             font-size: 0.8rem !important;
-            overflow: hidden;
             white-space: nowrap;
+            overflow: hidden;
             text-overflow: ellipsis;
         }
-        
-        /* Hide extra header clutter */
         header {visibility: hidden;}
     }
     </style>
@@ -171,7 +163,7 @@ def fetch_market_data():
 
 # --- UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v55_gridlock, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v56_dual_sensor, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -263,6 +255,7 @@ def get_agent_analysis(trend, hum, wind_dir, solar_min, sky, dew_f, temp_f, pres
 # --- FETCHERS ---
 def fetch_live_history():
     data_list = []
+    # 1. NWS FEED
     try:
         r = requests.get(NWS_API_HISTORY, headers=get_headers(), timeout=4)
         if r.status_code == 200:
@@ -298,6 +291,67 @@ def fetch_live_history():
                     "Press": press_in
                 })
     except: pass
+
+    # 2. AWC FEED (RESTORED)
+    try:
+        r = requests.get(AWC_METAR_URL, timeout=4)
+        for line in r.text.split('\n'):
+            if "KMIA" in line:
+                # Regex Parse: KMIA 241553Z ... 27/20 A3013
+                time_match = re.search(r"\b(\d{2})(\d{4})Z\b", line)
+                temp_match = re.search(r"\b(M?\d{2})/(M?\d{2})\b", line)
+                press_match = re.search(r"\bA(\d{4})\b", line)
+                wind_match = re.search(r"\b(\d{3}|VRB)(\d{2,3})G?(\d{2,3})?KT\b", line)
+                
+                if time_match and temp_match:
+                    day, tm = int(time_match.group(1)), time_match.group(2)
+                    # Date Logic
+                    now = datetime.now(timezone.utc)
+                    month, year = now.month, now.year
+                    if now.day < 5 and day > 25: month -= 1
+                    if month == 0: month, year = 12, year - 1
+                    dt_utc = datetime(year, month, day, int(tm[:2]), int(tm[2:]), tzinfo=timezone.utc)
+                    
+                    # Temp/Dew
+                    t_str, d_str = temp_match.group(1), temp_match.group(2)
+                    def parse_t(s): return -int(s[1:]) if 'M' in s else int(s)
+                    tc, dc = parse_t(t_str), parse_t(d_str)
+                    tf, df = (tc * 1.8) + 32, (dc * 1.8) + 32
+                    
+                    # Pressure
+                    press_in = float(press_match.group(1))/100.0 if press_match else 0.0
+                    
+                    # Wind
+                    w_str = "--"
+                    w_val = -1
+                    if wind_match:
+                        w_str = f"{wind_match.group(1)} @ {wind_match.group(2)}kt"
+                        if wind_match.group(1).isdigit(): w_val = int(wind_match.group(1))
+                        
+                    # Sky (Simple)
+                    sky = "CLR"
+                    if "OVC" in line: sky = "OVC"
+                    elif "BKN" in line: sky = "BKN"
+                    elif "SCT" in line: sky = "SCT"
+                    elif "FEW" in line: sky = "FEW"
+
+                    # Calc Hum
+                    hum = 100 * (math.exp((17.625*dc)/(243.04+dc))/math.exp((17.625*tc)/(243.04+tc)))
+
+                    data_list.append({
+                        "dt_utc": dt_utc,
+                        "Source": "AWC",
+                        "Temp": tf,
+                        "Official": int(round(tf)),
+                        "Wind": w_str,
+                        "Sky": sky,
+                        "WindVal": w_val,
+                        "Hum": hum,
+                        "Dew": df,
+                        "Press": press_in
+                    })
+    except: pass
+    
     return sorted(data_list, key=lambda x: x['dt_utc'], reverse=True)
 
 @st.cache_data(ttl=300)
@@ -313,8 +367,7 @@ def fetch_forecast_data():
             if r_d.status_code == 200:
                 periods = r_d.json().get('properties', {}).get('periods', [])
                 for p in periods:
-                    # Very simple date matching
-                    if p['isDaytime']: data["today_daily"] = p; break # Grab first day period
+                    if p['isDaytime']: data["today_daily"] = p; break 
             r_h = requests.get(hourly_url, headers=get_headers(), timeout=5)
             if r_h.status_code == 200:
                 data["all_hourly"] = r_h.json().get('properties', {}).get('periods', [])
@@ -399,7 +452,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price, bracket_cap):
             ai_conf = max(0, ai_conf - 40)
             referee_msg = f"⚠️ OVERSHOOT RISK: ITM ({high_round}°), but heating continues."
 
-    # INJECT CSS
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
 
     # METRICS GRID
