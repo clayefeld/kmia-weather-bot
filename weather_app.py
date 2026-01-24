@@ -64,8 +64,9 @@ class KalshiAuth:
         )
         return base64.b64encode(signature).decode('utf-8')
 
-# --- SMART MARKET FETCHER (CORRECTED BOUNDARIES) ---
-@st.cache_data(ttl=60)
+# --- SMART MARKET FETCHER (TURBO MODE) ---
+# CHANGED: TTL reduced from 60s to 5s for near-real-time updates
+@st.cache_data(ttl=5)
 def fetch_market_data():
     """
     Finds the active Miami High Temp event dynamically and returns bracket prices.
@@ -115,29 +116,17 @@ def fetch_market_data():
             label = "Unknown"
             strike_val = m['floor'] if m['floor'] else m['cap']
             
-            # --- SMART BOUNDARY LOGIC ---
             if i == 0:
-                # Bottom Bracket (e.g. 76 or below)
                 val = m['cap'] if m['cap'] else m['floor']
-                # Check overlap with next bracket to confirm shift
-                if count > 1 and parsed_markets[1]['floor'] == val:
-                    val = val - 1
-                
+                if count > 1 and parsed_markets[1]['floor'] == val: val = val - 1
                 label = f"{int(val)} or below"
                 strike_val = val 
-                
             elif i == count - 1:
-                # Top Bracket (e.g. 85 or above)
                 val = m['floor'] if m['floor'] else m['cap']
-                # Check overlap with prev bracket
-                if count > 1 and parsed_markets[i-1]['cap'] == val:
-                    val = val + 1
-                    
+                if count > 1 and parsed_markets[i-1]['cap'] == val: val = val + 1
                 label = f"{int(val)} or above"
                 strike_val = val
-                
             else:
-                # Middle Brackets (No change needed usually)
                 label = f"{m['floor']} - {m['cap']}"
             
             final_list.append({"label": label, "strike": float(strike_val), "price": m['price']})
@@ -149,7 +138,7 @@ def fetch_market_data():
 
 # --- STYLING & UTILS ---
 def get_headers():
-    return {'User-Agent': '(project_helios_v47_boundary_fix, myemail@example.com)'}
+    return {'User-Agent': '(project_helios_v48_turbo, myemail@example.com)'}
 
 def get_miami_time():
     try:
@@ -253,7 +242,6 @@ def fetch_live_history():
         r = requests.get(AWC_METAR_URL, timeout=4)
         for line in r.text.split('\n'):
             if "KMIA" in line:
-                # Basic METAR (Abbreviated)
                 pass 
     except: pass
     
@@ -305,16 +293,11 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
 
     latest = history[0]
     
-    # --- DATE FIX: FILTER FOR TODAY'S HIGH ---
+    # --- DATE FIX ---
     now_miami = get_miami_time()
     today_date = now_miami.date()
     today_records = [x for x in history if x['dt_utc'].astimezone(ZoneInfo("US/Eastern")).date() == today_date]
-    
-    if today_records:
-        high_mark = max(today_records, key=lambda x: x['Temp'])
-    else:
-        high_mark = latest
-
+    high_mark = max(today_records, key=lambda x: x['Temp']) if today_records else latest
     high_round = int(round(high_mark['Temp']))
     smart_trend = calculate_smart_trend(history)
 
@@ -372,6 +355,7 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
             if edge > 15: edge_color = "normal"; edge_label = "🔥 BUY Signal"
             elif edge < -15: edge_color = "inverse"; edge_label = "🛑 OVERPRICED"
             st.metric(f"Kalshi ({bracket_label})", f"{live_price}¢", f"{edge:+.0f}% Edge ({edge_label})", delta_color=edge_color)
+            st.caption(f"Last Update: {now_miami.strftime('%H:%M:%S')}") # Live Timestamp
         else:
             st.metric(f"Kalshi ({bracket_label})", "--", "API Error")
 
@@ -405,7 +389,6 @@ def render_live_dashboard(target_temp, bracket_label, live_price):
 
     # --- BRACKET SELECTOR ---
     st.subheader("🎯 Select Bracket (Live Markets)")
-    
     def set_target(val): st.query_params["target"] = str(val)
 
     markets, m_status = fetch_market_data()
@@ -466,30 +449,29 @@ def main():
     view_mode = st.sidebar.radio("Command Deck:", ["Live Monitor", "Today's Forecast"])
     st.sidebar.divider()
     
-    # Auto-Refresh
+    # Auto-Refresh (Changed to 10s default logic if active)
     default_auto = False
     if "auto" in st.query_params and st.query_params["auto"] == "true": default_auto = True
-    auto_refresh = st.sidebar.checkbox("⚡ Auto-Refresh (Every 60s)", value=default_auto)
+    auto_refresh = st.sidebar.checkbox("⚡ Turbo Refresh (Every 10s)", value=default_auto)
     if auto_refresh:
         st.query_params["auto"] = "true"
-        components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 60000);</script>""", height=0)
+        # CHANGED: 10000ms = 10s
+        components.html(f"""<script>setTimeout(function(){{window.parent.location.reload();}}, 10000);</script>""", height=0)
     else:
         if "auto" in st.query_params: del st.query_params["auto"]
 
-    # Target (Persistent)
     default_target = 81.0
     if "target" in st.query_params:
         try: default_target = float(st.query_params["target"])
         except: pass
 
-    # Fetch markets for labels/prices
     markets, _ = fetch_market_data()
     current_label = f"{default_target}"
     current_price = None
     for m in markets:
         if m['strike'] == default_target:
             current_label = m['label']
-            if m['price'] > 0: current_price = m['price']
+            current_price = m['price']
             break
 
     now_miami = get_miami_time()
