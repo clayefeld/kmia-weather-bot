@@ -53,7 +53,7 @@ div.stButton > button {width: 100%;}
 </style>
 """
 
-# --- LOGGING (to console; Streamlit cloud logs show it) ---
+# --- LOGGING ---
 logger = logging.getLogger("helios")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -64,10 +64,10 @@ if not logger.handlers:
 # =============================================================================
 def make_session() -> requests.Session:
     s = requests.Session()
-    # NWS asks for a User-Agent that identifies the application
+    # NWS expects a User-Agent (identifying the application)
     s.headers.update(
         {
-            "User-Agent": "ProjectHelios/1.0 (Streamlit app)",
+            "User-Agent": "ProjectHelios/1.1 (Streamlit app)",
             "Accept": "application/geo+json, application/json;q=0.9, */*;q=0.8",
         }
     )
@@ -78,12 +78,10 @@ SESSION = make_session()
 
 
 def safe_get(url: str, timeout: float = 4.0) -> requests.Response:
-    # light retry/backoff for transient failures
     last_exc = None
     for attempt in range(3):
         try:
-            r = SESSION.get(url, timeout=timeout)
-            return r
+            return SESSION.get(url, timeout=timeout)
         except Exception as e:
             last_exc = e
             time.sleep(0.25 * (attempt + 1))
@@ -101,7 +99,6 @@ def parse_iso_time(iso_str: str) -> datetime | None:
     if not iso_str:
         return None
     try:
-        # Handle trailing Z
         s = iso_str.replace("Z", "+00:00")
         return datetime.fromisoformat(s)
     except Exception:
@@ -124,7 +121,6 @@ def mps_to_kt(mps: float) -> float:
 def calculate_heat_index(temp_f: float, humidity: float) -> float:
     if temp_f < 80:
         return temp_f
-    # NOAA heat index regression
     c1, c2, c3, c4, c5, c6, c7, c8, c9 = (
         -42.379,
         2.04901523,
@@ -140,15 +136,29 @@ def calculate_heat_index(temp_f: float, humidity: float) -> float:
     return c1 + (c2 * T) + (c3 * R) + (c4 * T * R) + (c5 * T**2) + (c6 * R**2) + (c7 * T**2 * R) + (c8 * T * R**2) + (c9 * T**2 * R**2)
 
 
-def format_strike_label(floor: float | None, cap: float | None) -> str:
-    if floor is None and cap is not None:
-        return f"{int(round(cap))}° or below"
-    if cap is None and floor is not None:
-        return f"{int(round(floor))}° or above"
-    if floor is not None and cap is not None:
-        # inclusive-ish label; you can change to "to" if you prefer
-        return f"{int(round(floor))}° – {int(round(cap))}°"
-    return "Unknown"
+def condition_icon(sky: str, wx: str | None = None) -> str:
+    s = (sky or "").upper()
+    w = (wx or "").upper()
+
+    # Precip/TS overrides
+    if "TS" in w:
+        return "⛈️"
+    if "RA" in w or "SH" in w:
+        return "🌧️"
+    if "FG" in w or "BR" in w or "HZ" in w:
+        return "🌫️"
+
+    if s in ("CLR", "SKC"):
+        return "☀️"
+    if s == "FEW":
+        return "🌤️"
+    if s == "SCT":
+        return "⛅"
+    if s in ("BKN", "OVC"):
+        return "☁️"
+    if s:
+        return "☁️"
+    return "—"
 
 
 # =============================================================================
@@ -195,11 +205,21 @@ class KalshiAuth:
 
 
 # =============================================================================
-# KALSHI MARKET FETCHER
+# KALSHI MARKET FETCHER (labels fixed to match website: "76° or below", "85° or above")
 # =============================================================================
+def format_strike_label(floor: float | None, cap: float | None) -> str:
+    # Use exact API strikes; do NOT "±1" adjust. This matches the website labels.
+    if floor is None and cap is not None:
+        return f"{int(round(cap))}° or below"
+    if cap is None and floor is not None:
+        return f"{int(round(floor))}° or above"
+    if floor is not None and cap is not None:
+        return f"{int(round(floor))}° - {int(round(cap))}°"
+    return "Unknown"
+
+
 @st.cache_data(ttl=5)
 def fetch_market_data() -> tuple[list[dict], str]:
-    # Returns: (markets, status)
     try:
         from cryptography.hazmat.primitives import serialization  # noqa: F401
     except Exception:
@@ -207,11 +227,11 @@ def fetch_market_data() -> tuple[list[dict], str]:
 
     auth = KalshiAuth()
     if not auth.ready:
-        return [], f"🔴 Kalshi auth error"
+        return [], "🔴 Kalshi key error"
 
     try:
         now_miami = get_miami_time()
-        date_str = now_miami.strftime("%y%b%d").upper()
+        date_str = now_miami.strftime("%y%b%d").upper()  # e.g., 26JAN24
         event_ticker = f"KXHIGHMIA-{date_str}"
 
         path = f"/events/{event_ticker}"
@@ -236,25 +256,19 @@ def fetch_market_data() -> tuple[list[dict], str]:
             cap = m.get("cap_strike")
             ask = m.get("yes_ask", 0) or 0
 
-            # Kalshi can return None for open-ended ranges
             floor_f = float(floor) if floor is not None else None
             cap_f = float(cap) if cap is not None else None
 
-            # sorting: first open-low (floor None), then by floor, then open-high (cap None)
+            # Sort: open-low first, then by floor, open-high last
             if floor_f is None and cap_f is not None:
-                sort_key = cap_f - 10_000  # push to top
+                sort_key = -1_000_000 + cap_f
             elif floor_f is not None:
                 sort_key = floor_f
             else:
-                sort_key = 10_000_000  # push to bottom
+                sort_key = 1_000_000
 
             parsed.append(
-                {
-                    "floor": floor_f,
-                    "cap": cap_f,
-                    "price": int(ask),
-                    "sort": sort_key,
-                }
+                {"floor": floor_f, "cap": cap_f, "price": int(ask), "sort": sort_key}
             )
 
         parsed.sort(key=lambda x: x["sort"])
@@ -262,11 +276,14 @@ def fetch_market_data() -> tuple[list[dict], str]:
         final_list = []
         for m in parsed:
             label = format_strike_label(m["floor"], m["cap"])
-            # choose a representative "strike" for UI selection:
-            # - open-low: use cap
-            # - middle: use floor
-            # - open-high: use floor
-            strike = m["cap"] if (m["floor"] is None and m["cap"] is not None) else m["floor"]
+            # Representative strike for UI selection:
+            # - open-low: cap
+            # - middle/open-high: floor
+            if m["floor"] is None and m["cap"] is not None:
+                strike = m["cap"]
+            else:
+                strike = m["floor"]
+
             final_list.append(
                 {
                     "label": label,
@@ -278,7 +295,7 @@ def fetch_market_data() -> tuple[list[dict], str]:
             )
 
         return final_list, "🟢 Live"
-    except Exception as e:
+    except Exception:
         logger.exception("Kalshi fetch error")
         return [], "🔴 Kalshi API error"
 
@@ -297,17 +314,15 @@ def fetch_forecast_data() -> dict:
         "status": [],
     }
 
-    # NWS point -> forecast + hourly URLs
+    # NWS point -> forecast URLs
     try:
         r = safe_get(NWS_POINT_URL, timeout=6)
         r.raise_for_status()
         urls = r.json().get("properties", {})
 
-        # Daily forecast periods
         r_d = safe_get(urls.get("forecast"), timeout=6)
         if r_d.status_code == 200:
             periods = r_d.json().get("properties", {}).get("periods", [])
-            # pick first daytime as "today", next daytime as "tomorrow"
             daytimes = [p for p in periods if p.get("isDaytime")]
             if len(daytimes) >= 1:
                 data["today_daily"] = daytimes[0]
@@ -316,7 +331,6 @@ def fetch_forecast_data() -> dict:
         else:
             data["status"].append("NWS daily forecast unavailable")
 
-        # Hourly forecast periods
         r_h = safe_get(urls.get("forecastHourly"), timeout=6)
         if r_h.status_code == 200:
             data["all_hourly"] = r_h.json().get("properties", {}).get("periods", [])
@@ -327,7 +341,7 @@ def fetch_forecast_data() -> dict:
         logger.exception("NWS forecast error")
         data["status"].append("NWS forecast error")
 
-    # HRRR(Open-Meteo): pick index by matching time strings
+    # HRRR via Open-Meteo: pick nearest time index
     try:
         r = safe_get(OM_API_URL, timeout=5)
         if r.status_code == 200:
@@ -336,18 +350,18 @@ def fetch_forecast_data() -> dict:
             times = h.get("time", [])
             if times:
                 now_local = get_miami_time().replace(minute=0, second=0, microsecond=0)
-                # Open-Meteo times are local strings in the requested timezone
-                best_i, best_dt = None, None
+                best_i = None
+                best_delta = None
+
                 for i, t in enumerate(times):
                     dt = parse_iso_time(t)
                     if dt is None:
                         continue
-                    # dt may come naive; assume local timezone if naive
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=TZ_MIAMI)
-                    # find nearest hour
-                    if best_dt is None or abs((dt - now_local).total_seconds()) < abs((best_dt - now_local).total_seconds()):
-                        best_dt = dt
+                    delta = abs((dt - now_local).total_seconds())
+                    if best_delta is None or delta < best_delta:
+                        best_delta = delta
                         best_i = i
 
                 if best_i is not None:
@@ -366,9 +380,8 @@ def fetch_forecast_data() -> dict:
     try:
         r = safe_get(AWC_TAF_URL, timeout=5)
         if r.status_code == 200:
-            # raw text; keep first non-empty lines
             lines = [ln.strip() for ln in r.text.splitlines() if ln.strip()]
-            data["taf_raw"] = "\n".join(lines[:6]) if lines else None
+            data["taf_raw"] = "\n".join(lines[:8]) if lines else None
     except Exception:
         logger.exception("TAF fetch error")
         data["status"].append("TAF unavailable")
@@ -377,41 +390,31 @@ def fetch_forecast_data() -> dict:
 
 
 # =============================================================================
-# LIVE OBSERVATIONS FETCHER (NWS station obs + METAR)
+# LIVE OBSERVATIONS (NWS station obs + METAR), with dedupe
 # =============================================================================
 def _metar_month_rollover(dt: datetime, now_utc: datetime) -> datetime:
-    """
-    METAR gives day-of-month only. If it appears to be in the future vs now_utc,
-    assume it belongs to previous month (rollover fix).
-    """
+    # If parsed METAR timestamp looks in the future (month boundary), roll back a month.
     if dt > now_utc + timedelta(hours=2):
-        # roll back ~1 month safely
         first = datetime(now_utc.year, now_utc.month, 1, tzinfo=timezone.utc)
-        prev_last_day = first - timedelta(days=1)
-        # clamp day to last day of previous month
-        day = min(dt.day, prev_last_day.day)
-        return datetime(prev_last_day.year, prev_last_day.month, day, dt.hour, dt.minute, tzinfo=timezone.utc)
+        prev_last = first - timedelta(days=1)
+        day = min(dt.day, prev_last.day)
+        return datetime(prev_last.year, prev_last.month, day, dt.hour, dt.minute, tzinfo=timezone.utc)
     return dt
 
 
 def _bucket_key(dt: datetime, minutes: int = 5) -> tuple:
-    # bucket into 5-min windows to dedupe near-identical timestamps
     dt = dt.astimezone(timezone.utc)
     bucket_min = (dt.minute // minutes) * minutes
     return (dt.year, dt.month, dt.day, dt.hour, bucket_min)
 
 
 def _source_priority(src: str) -> int:
-    # Prefer METAR for "official-ish" aviation surface obs, then NWS
+    # Keep both sources, but dedupe per bucket; prefer METAR as aviation surface obs.
     return {"AWC": 0, "NWS": 1}.get(src, 9)
 
 
 def merge_and_dedupe(observations: list[dict]) -> list[dict]:
-    """
-    Dedupe by 5-min bucket and choose best source by priority.
-    Keep latest dt in each bucket if same source.
-    """
-    buckets = {}
+    buckets: dict[tuple, dict] = {}
     for o in observations:
         k = _bucket_key(o["dt_utc"], minutes=5)
         cur = buckets.get(k)
@@ -419,7 +422,6 @@ def merge_and_dedupe(observations: list[dict]) -> list[dict]:
             buckets[k] = o
             continue
 
-        # pick better by source priority, then newer timestamp
         if _source_priority(o["Source"]) < _source_priority(cur["Source"]):
             buckets[k] = o
         elif _source_priority(o["Source"]) == _source_priority(cur["Source"]):
@@ -432,8 +434,8 @@ def merge_and_dedupe(observations: list[dict]) -> list[dict]:
 
 
 def fetch_live_history() -> tuple[list[dict], list[str]]:
-    data_list = []
-    status = []
+    data_list: list[dict] = []
+    status: list[str] = []
 
     # --- NWS station observations ---
     try:
@@ -448,30 +450,27 @@ def fetch_live_history() -> tuple[list[dict], list[str]]:
                 if t_c is None or dt is None:
                     continue
 
-                # Normalize dt to aware UTC
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 dt_utc = dt.astimezone(timezone.utc)
 
-                # Wind
+                # Wind (NWS windSpeed usually m/s)
                 wdir = (p.get("windDirection") or {}).get("value")
-                wspd = (p.get("windSpeed") or {}).get("value")  # often m/s
+                wspd = (p.get("windSpeed") or {}).get("value")
                 w_str = "--"
                 w_val = -1
                 if wdir is not None:
-                    w_val = int(round(wdir))
+                    w_val = int(round(float(wdir)))
                 if wdir is not None and wspd is not None:
                     try:
                         kt = mps_to_kt(float(wspd))
-                        w_str = f"{int(round(wdir)):03d} @ {int(round(kt))}kt"
+                        w_str = f"{int(round(float(wdir))):03d} @ {int(round(kt))}kt"
                     except Exception:
                         w_str = "--"
 
-                # Sky
                 clouds = p.get("cloudLayers") or []
                 sky_str = clouds[0].get("amount", "--") if clouds else "--"
 
-                # Humidity / dewpoint / pressure
                 hum = (p.get("relativeHumidity") or {}).get("value")
                 hum = float(hum) if hum is not None else 0.0
 
@@ -491,6 +490,7 @@ def fetch_live_history() -> tuple[list[dict], list[str]]:
                         "Official": int(round(temp_f)),
                         "Wind": w_str,
                         "Sky": sky_str,
+                        "Wx": None,
                         "WindVal": w_val,
                         "Hum": hum,
                         "Dew": dew_f,
@@ -515,7 +515,7 @@ def fetch_live_history() -> tuple[list[dict], list[str]]:
                 tm_m = re.search(r"\b(\d{2})(\d{4})Z\b", line)
                 tp_m = re.search(r"\b(M?\d{2})/(M?\d{2})\b", line)
                 pr_m = re.search(r"\bA(\d{4})\b", line)
-                wind_match = re.search(r"\b(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?KT\b", line)
+                wind_m = re.search(r"\b(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?KT\b", line)
 
                 if not (tm_m and tp_m):
                     continue
@@ -533,13 +533,14 @@ def fetch_live_history() -> tuple[list[dict], list[str]]:
 
                 w_str = "--"
                 w_val = -1
-                if wind_match:
-                    wd = wind_match.group(1)
-                    ws = wind_match.group(2)
+                if wind_m:
+                    wd = wind_m.group(1)
+                    ws = wind_m.group(2)
                     w_str = f"{wd} @ {ws}kt"
                     if wd.isdigit():
                         w_val = int(wd)
 
+                # Cloud amount (simple)
                 sky = "CLR"
                 if "OVC" in line:
                     sky = "OVC"
@@ -550,7 +551,16 @@ def fetch_live_history() -> tuple[list[dict], list[str]]:
                 elif "FEW" in line:
                     sky = "FEW"
 
-                # RH approximation from T and Td (Magnus)
+                # Simple weather token detection (for icons)
+                wx = None
+                # Common METAR codes: TS, RA, SHRA, BR, FG, HZ
+                if re.search(r"\bTS\b", line):
+                    wx = "TS"
+                elif re.search(r"\b(SH)?RA\b", line):
+                    wx = "RA"
+                elif re.search(r"\bFG\b|\bBR\b|\bHZ\b", line):
+                    wx = "FG"
+
                 try:
                     hum = 100.0 * (
                         math.exp((17.625 * dc) / (243.04 + dc))
@@ -570,6 +580,7 @@ def fetch_live_history() -> tuple[list[dict], list[str]]:
                         "Official": int(round(temp_f)),
                         "Wind": w_str,
                         "Sky": sky,
+                        "Wx": wx,
                         "WindVal": w_val,
                         "Hum": float(hum),
                         "Dew": dew_f,
@@ -590,10 +601,6 @@ def fetch_live_history() -> tuple[list[dict], list[str]]:
 # TREND + "AGENT"
 # =============================================================================
 def calculate_smart_trend(master_list: list[dict]) -> float:
-    """
-    Linear regression slope over last hour points.
-    Returns °F/hour.
-    """
     if len(master_list) < 2:
         return 0.0
 
@@ -603,7 +610,7 @@ def calculate_smart_trend(master_list: list[dict]) -> float:
     if len(points) < 2:
         return 0.0
 
-    x = [(p["dt_utc"] - one_hr_ago).total_seconds() / 60.0 for p in points]  # minutes from start
+    x = [(p["dt_utc"] - one_hr_ago).total_seconds() / 60.0 for p in points]  # minutes
     y = [p["Temp"] for p in points]
 
     N = len(x)
@@ -616,7 +623,7 @@ def calculate_smart_trend(master_list: list[dict]) -> float:
         return 0.0
 
     slope_per_min = (N * sum_xy - sum_x * sum_y) / den
-    return slope_per_min * 60.0
+    return slope_per_min * 60.0  # °F/hr
 
 
 def get_agent_analysis(
@@ -629,19 +636,11 @@ def get_agent_analysis(
     precip_prob: float,
     current_hour: int,
 ) -> tuple[str, str, int]:
-    """
-    Simple, explainable heuristic:
-    - early day: trend more predictive
-    - high solar: supports further heating
-    - low solar / high precip: reduces heating
-    - saturated air (small dewpoint depression): increases "trap" risk (storms/caps)
-    - ocean breeze: can cap max temp
-    """
     reasons = []
     confidence = 50
     sentiment = "NEUTRAL"
 
-    # 1) Time of day (diurnal)
+    # Diurnal
     if current_hour < 11:
         reasons.append("Morning ramp")
         confidence += 20
@@ -652,7 +651,7 @@ def get_agent_analysis(
         reasons.append(f"Late day ({current_hour}:00)")
         confidence -= 15
 
-    # 2) Solar / precip
+    # Solar / precip
     if rad_watts >= 700:
         reasons.append(f"Strong sun ({int(rad_watts)} W/m²)")
         confidence += 15
@@ -664,7 +663,7 @@ def get_agent_analysis(
         reasons.append(f"Rain risk ({int(precip_prob)}%)")
         confidence -= 10
 
-    # 3) Moisture (dewpoint depression)
+    # Moisture (dewpoint depression)
     dew_dep = temp_f - dew_f
     if dew_dep < 3:
         reasons.append("Air near-saturated (storm cap risk)")
@@ -674,7 +673,7 @@ def get_agent_analysis(
         reasons.append("Drier air (more heating potential)")
         confidence += 8
 
-    # 4) Wind direction heuristic
+    # Wind direction
     if 0 <= wind_dir <= 180:
         reasons.append("Ocean breeze bias (cooling cap)")
         confidence -= 8
@@ -682,7 +681,7 @@ def get_agent_analysis(
         reasons.append("Land breeze bias")
         confidence += 5
 
-    # 5) Trend itself
+    # Trend
     if trend_f_per_hr > 0.7:
         reasons.append(f"Fast rise (+{trend_f_per_hr:.1f}°F/hr)")
         confidence += 12
@@ -705,6 +704,23 @@ def get_agent_analysis(
 
 
 # =============================================================================
+# AUTO-REFRESH (no time.sleep)
+# =============================================================================
+def render_autorefresh(interval_seconds: int):
+    interval_ms = max(1, int(interval_seconds)) * 1000
+    components.html(
+        f"""
+        <script>
+        setTimeout(function() {{
+            window.location.reload();
+        }}, {interval_ms});
+        </script>
+        """,
+        height=0,
+    )
+
+
+# =============================================================================
 # UI RENDERING
 # =============================================================================
 def render_live_dashboard(target_temp: float, bracket_label: str, live_price: int, bracket_cap: float | None):
@@ -717,7 +733,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     history, obs_status = fetch_live_history()
     f_data = fetch_forecast_data()
 
-    if obs_status:
+    if obs_status or (f_data.get("status") or []):
         with st.expander("Data status / warnings", expanded=False):
             for s in obs_status:
                 st.warning(s)
@@ -731,7 +747,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     latest = history[0]
     now_miami = get_miami_time()
 
-    # Day high based on deduped merged list (you can change to NWS-only if you prefer)
+    # Day high
     today_recs = [x for x in history if x["dt_utc"].astimezone(TZ_MIAMI).date() == now_miami.date()]
     high_mark = max(today_recs, key=lambda x: x["Temp"]) if today_recs else latest
     high_round = int(round(high_mark["Temp"]))
@@ -745,7 +761,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
 
     smart_trend = calculate_smart_trend(history)
 
-    # Optional: cap extreme late-day negative trend to reduce noise
+    # optional late-day trend damping
     safe_trend = smart_trend
     if now_miami.hour > 17 and safe_trend < -0.5:
         safe_trend = -0.5
@@ -761,7 +777,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         current_hour=now_miami.hour,
     )
 
-    # Bust logic (if bracket has a cap and day high already exceeded it)
+    # bust logic
     ref_msg = None
     if bracket_cap is not None and high_round > bracket_cap:
         ai_conf = 0
@@ -771,7 +787,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         ai_conf = max(0, ai_conf - 40)
         ref_msg = "⚠️ ITM already, but conditions still support further heating."
 
-    # Forecast high from NWS daytime period (use max to avoid going below current day high)
+    # Forecast high from NWS daytime period
     forecast_high = high_round
     if f_data.get("today_daily"):
         nws_high = f_data["today_daily"].get("temperature")
@@ -805,11 +821,10 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
 
     m1.info(f"🤖 **PHYSICS:** :{color}[**{ai_sent}**] ({ai_conf}%)\n\n{ref_msg if ref_msg else ai_reason}")
 
-    # price is cents ~ implied probability; compare to confidence ~%
     edge = ai_conf - (live_price or 0)
     m2.metric(f"Kalshi ({bracket_label})", f"{live_price}¢", f"{edge:+.0f}% Edge", delta_color="off")
 
-    # Next 3 hours projection using NWS hourly + trend blend
+    # Next 3 hours projection
     next_3_hours = []
     current_utc = datetime.now(timezone.utc)
     for p in f_data.get("all_hourly", []):
@@ -826,13 +841,11 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         curr_temp = latest["Temp"]
         for i, f in enumerate(next_3_hours):
             nws_temp = float(f.get("temperature"))
-            # blend: closer hours lean more on trend, later hours lean more on NWS
             trend_weight = 0.45 / (i + 1)
             model_weight = 1.0 - trend_weight
 
             raw_proj = (curr_temp + (safe_trend * (i + 1))) * trend_weight + (nws_temp * model_weight)
 
-            # ocean breeze slight cap
             if 0 <= latest["WindVal"] <= 180:
                 raw_proj -= 0.4 * (i + 1)
 
@@ -853,7 +866,7 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         st.caption("TAF (AWC)")
         st.code(f_data["taf_raw"], language="text")
 
-    # Markets: bracket buttons
+    # Markets buttons
     st.subheader("🎯 Select Bracket (Live Markets)")
     markets, m_status = fetch_market_data()
     if m_status != "🟢 Live":
@@ -870,38 +883,52 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     else:
         st.info("No markets returned for today (ticker may be unavailable yet).")
 
-    # Sensor log table
+    # Sensor log (requested columns)
     st.subheader("Sensor Log (Miami Time)")
     clean_rows = []
-    for i, row in enumerate(history[:15]):
-        vel_str = "—"
+    for i, row in enumerate(history[:20]):
+        # Velocity computed vs next row (older reading)
+        vel = None
+        vel_arrow = "—"
         if i < len(history) - 1:
             dt1, dt2 = row["dt_utc"], history[i + 1]["dt_utc"]
             diff_hr = (dt1 - dt2).total_seconds() / 3600.0
             if diff_hr > 0:
-                v = (row["Temp"] - history[i + 1]["Temp"]) / diff_hr
-                if v > 0.5:
-                    vel_str = "⬆️ Fast"
-                elif v > 0.1:
-                    vel_str = "↗️ Rising"
-                elif v < -0.5:
-                    vel_str = "⬇️ Drop"
-                elif v < -0.1:
-                    vel_str = "↘️ Falling"
+                vel = (row["Temp"] - history[i + 1]["Temp"]) / diff_hr
+                if vel > 0.5:
+                    vel_arrow = "⬆️"
+                elif vel > 0.1:
+                    vel_arrow = "↗️"
+                elif vel < -0.5:
+                    vel_arrow = "⬇️"
+                elif vel < -0.1:
+                    vel_arrow = "↘️"
+
+        vel_str = "—"
+        if vel is not None:
+            vel_str = f"{vel:+.2f}°F/hr {vel_arrow}"
+
+        sky = row.get("Sky", "--")
+        wx = row.get("Wx")
+        cond = f"{condition_icon(sky, wx)} {sky}"
+
+        hi = calculate_heat_index(row["Temp"], row["Hum"])
 
         clean_rows.append(
             {
                 "Time": get_display_time(row["dt_utc"]),
-                "Src": row["Source"],
-                "Condition": row["Sky"],
-                "Temp (°F)": f"{row['Temp']:.2f}",
-                "Dew (°F)": f"{row['Dew']:.1f}",
-                "Hum": f"{int(round(row['Hum']))}%",
-                "Press (inHg)": f"{row['Press']:.2f}",
-                "Velocity": vel_str,
+                "Source": row["Source"],
+                "Condition": cond,
+                "Temp": f"{row['Temp']:.2f}°F",
+                "Heat Index": f"{hi:.1f}°F",
+                "Dew Point": f"{row['Dew']:.1f}°F",
+                "Humidity": f"{int(round(row['Hum']))}%",
+                "Pressure": f"{row['Press']:.2f} inHg",
                 "Wind": row["Wind"],
+                "Velocity": vel_str,
             }
         )
+
     st.table(pd.DataFrame(clean_rows))
 
 
@@ -941,24 +968,6 @@ def render_forecast_generic(daily: dict | None, hourly: list, date_label: str):
 
 
 # =============================================================================
-# AUTO-REFRESH (no time.sleep)
-# =============================================================================
-def render_autorefresh(interval_seconds: int):
-    # page reload (simple, reliable)
-    interval_ms = max(1, int(interval_seconds)) * 1000
-    components.html(
-        f"""
-        <script>
-        setTimeout(function() {{
-            window.location.reload();
-        }}, {interval_ms});
-        </script>
-        """,
-        height=0,
-    )
-
-
-# =============================================================================
 # MAIN
 # =============================================================================
 def main():
@@ -978,11 +987,10 @@ def main():
     if auto:
         render_autorefresh(10)
 
-    # Pull markets once for label/price lookup
+    # pull markets once to set label/price/cap for selected bracket
     markets, _ = fetch_market_data()
     lbl, price, cap = "Target", 0, None
     for m in markets:
-        # selection uses representative strike; match exact float
         if not math.isnan(m["strike"]) and float(m["strike"]) == float(tgt):
             lbl = m["label"]
             price = m["price"]
@@ -1002,7 +1010,6 @@ def main():
                 date_label=now.strftime("%A"),
             )
         else:
-            # For tomorrow, filter hourly to tomorrow's local date for cleaner table
             tomorrow = (now + timedelta(days=1)).date()
             hourly = []
             for h in (f_data.get("all_hourly") or []):
