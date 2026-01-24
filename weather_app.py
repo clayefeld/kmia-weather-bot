@@ -113,6 +113,15 @@ def get_display_time(dt_aware: datetime) -> str:
     return dt_aware.astimezone(TZ_MIAMI).strftime("%I:%M %p")
 
 
+def format_ordinal_day(dt_obj: datetime) -> str:
+    day = dt_obj.day
+    if 11 <= day <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{dt_obj.strftime('%A')} {day}{suffix}"
+
+
 @st.cache_data(ttl=3600)
 def get_sun_times(local_date) -> Tuple[datetime, datetime]:
     city = LocationInfo(name="Miami", region="USA", timezone="America/New_York", latitude=25.7954, longitude=-80.2901)
@@ -1313,7 +1322,7 @@ def main() -> None:
             render_forecast_generic(
                 daily=f_data.get("today_daily"),
                 hourly=f_data.get("all_hourly", []),
-                date_label=now.strftime("%A"),
+                date_label=format_ordinal_day(now),
                 f_data=f_data,
                 which_day="today",
             )
@@ -1332,7 +1341,7 @@ def main() -> None:
             render_forecast_generic(
                 daily=f_data.get("tomorrow_daily"),
                 hourly=hourly if hourly else (f_data.get("all_hourly") or []),
-                date_label=(now + timedelta(days=1)).strftime("%A"),
+                date_label=format_ordinal_day(now + timedelta(days=1)),
                 f_data=f_data,
                 which_day="tomorrow",
             )
