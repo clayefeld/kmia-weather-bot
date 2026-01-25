@@ -36,10 +36,10 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 OM_API_URL = (
-    "https://api.open-meteo.com/v1/gfs"
+    "https://api.open-meteo.com/v1/forecast"
     "?latitude=25.7954&longitude=-80.2901"
     "&hourly=temperature_2m,precipitation_probability,shortwave_radiation,cloud_cover"
-    "&timezone=America%2FNew_York&forecast_days=2"
+    "&timezone=America%2FNew_York&forecast_days=2&models=hrrr_north_america"
 )
 
 # --- GLOBAL STYLES ---
@@ -54,53 +54,6 @@ div.stButton > button {width: 100%;}
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
     [data-testid="stMetricLabel"] { font-size: 0.8rem !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     header {visibility: hidden;}
-}
-</style>
-"""
-
-WETHR_CSS = """
-<style>
-.wethr-header {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-}
-.wethr-subtle {
-    color: rgba(255,255,255,0.7);
-    font-size: 0.9rem;
-}
-.wethr-links a {
-    margin-right: 0.6rem;
-    font-weight: 600;
-    text-decoration: none;
-}
-.wethr-card {
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 14px;
-    padding: 1rem 1.1rem;
-    min-height: 110px;
-}
-.wethr-card h4 {
-    margin: 0 0 0.35rem 0;
-    font-size: 0.85rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: rgba(255,255,255,0.6);
-}
-.wethr-card .value {
-    font-size: 1.9rem;
-    font-weight: 700;
-}
-.wethr-card .sub {
-    color: rgba(255,255,255,0.75);
-    font-size: 0.85rem;
-}
-.section-title {
-    margin-top: 1.2rem;
-    font-weight: 700;
-    font-size: 1.1rem;
 }
 </style>
 """
@@ -508,7 +461,7 @@ def fetch_forecast_data() -> Dict[str, Any]:
         logger.exception("NWS forecast error")
         data["status"].append("NWS forecast error")
 
-    # HRRR via Open-Meteo (GFS/HRRR endpoint)
+    # HRRR via Open-Meteo
     try:
         r = safe_get(OM_API_URL, timeout=5)
         if r.status_code == 200:
@@ -564,9 +517,6 @@ def fetch_forecast_data() -> Dict[str, Any]:
 
                 data["hrrr_today_peak"] = {"rad": peak_rad_today, "precip": peak_pp_today}
                 data["hrrr_tomorrow_peak"] = {"rad": peak_rad_tmr, "precip": peak_pp_tmr}
-        else:
-            data["status"].append("HRRR(Open-Meteo) unavailable")
-
     except Exception:
         logger.exception("HRRR(Open-Meteo) fetch error")
         data["status"].append("HRRR(Open-Meteo) unavailable")
@@ -700,16 +650,15 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
         if r.status_code == 200:
             for line in r.text.splitlines():
                 line = line.strip()
-                if not line or " KMIA " not in f" {line} ":
+                if not line or not line.startswith("KMIA"):
                     continue
 
                 tm_m = re.search(r"\b(\d{2})(\d{4})Z\b", line)
                 tp_m = re.search(r"\b(M?\d{2})/(M?\d{2})\b", line)
-                tg_m = re.search(r"\bT([01])(\d{3})([01])(\d{3})\b", line)
                 pr_m = re.search(r"\bA(\d{4})\b", line)
                 wind_m = re.search(r"\b(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?KT\b", line)
 
-                if not (tm_m and (tp_m or tg_m)):
+                if not (tm_m and tp_m):
                     continue
 
                 day = int(tm_m.group(1))
@@ -718,16 +667,8 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
                 dt = datetime(now_utc.year, now_utc.month, day, int(hhmm[:2]), int(hhmm[2:]), tzinfo=timezone.utc)
                 dt = _metar_month_rollover(dt, now_utc)
 
-                tc: Optional[float] = None
-                dc: Optional[float] = None
-                if tg_m:
-                    t_sign = -1 if tg_m.group(1) == "1" else 1
-                    d_sign = -1 if tg_m.group(3) == "1" else 1
-                    tc = t_sign * (int(tg_m.group(2)) / 10.0)
-                    dc = d_sign * (int(tg_m.group(4)) / 10.0)
-                elif tp_m:
-                    tc = float(int(tp_m.group(1).replace("M", "-")))
-                    dc = float(int(tp_m.group(2).replace("M", "-")))
+                tc = int(tp_m.group(1).replace("M", "-"))
+                dc = int(tp_m.group(2).replace("M", "-"))
 
                 press_in = int(pr_m.group(1)) / 100.0 if pr_m else 0.0
 
@@ -758,20 +699,16 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
                 elif re.search(r"\bFG\b|\bBR\b|\bHZ\b", line):
                     wx = "FG"
 
-                hum = 0.0
-                temp_f = 0.0
-                dew_f = 0.0
-                if tc is not None and dc is not None:
-                    try:
-                        hum = 100.0 * (
-                            math.exp((17.625 * dc) / (243.04 + dc))
-                            / math.exp((17.625 * tc) / (243.04 + tc))
-                        )
-                    except Exception:
-                        hum = 0.0
+                try:
+                    hum = 100.0 * (
+                        math.exp((17.625 * dc) / (243.04 + dc))
+                        / math.exp((17.625 * tc) / (243.04 + tc))
+                    )
+                except Exception:
+                    hum = 0.0
 
-                    temp_f = c_to_f(tc)
-                    dew_f = c_to_f(dc)
+                temp_f = c_to_f(float(tc))
+                dew_f = c_to_f(float(dc))
 
                 data_list.append(
                     {
@@ -785,7 +722,6 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
                         "Hum": float(hum),
                         "Dew": dew_f,
                         "Press": press_in,
-                        "Raw": line,
                     }
                 )
         else:
@@ -1076,18 +1012,8 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     now_miami = get_miami_time()
 
     today_recs = [x for x in history if x["dt_utc"].astimezone(TZ_MIAMI).date() == now_miami.date()]
-    awc_today_recs = [x for x in today_recs if x.get("Source") == "AWC"]
-    if awc_today_recs:
-        high_mark = max(awc_today_recs, key=lambda x: x["Temp"])
-    else:
-        high_mark = max(today_recs, key=lambda x: x["Temp"]) if today_recs else latest
+    high_mark = max(today_recs, key=lambda x: x["Temp"]) if today_recs else latest
     high_round = int(round(high_mark["Temp"]))
-
-    low_mark = min(today_recs, key=lambda x: x["Temp"]) if today_recs else latest
-    low_round = int(round(low_mark["Temp"]))
-
-    prev = history[1] if len(history) > 1 else None
-    temp_change = None if prev is None else (latest["Temp"] - prev["Temp"])
 
     hrrr_rad = None
     hrrr_precip = None
@@ -1137,102 +1063,13 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         if isinstance(nws_high, (int, float)):
             forecast_high = max(forecast_high, int(nws_high))
 
-    st.markdown(HIDE_INDEX_CSS + WETHR_CSS, unsafe_allow_html=True)
+    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
 
-    st.markdown(
-        f"""
-        <div class="wethr-header">
-          <div><strong>Miami (KMIA)</strong></div>
-          <div class="wethr-subtle">DATE: {now_miami.strftime('%m/%d/%Y')}</div>
-        </div>
-        <div class="wethr-links">
-          <a href="https://kalshi.com/markets/KXHIGHMIA" target="_blank">Trade on Kalshi</a>
-          <a href="https://polymarket.com/search?q=Miami%20temperature" target="_blank">Polymarket</a>
-          <a href="https://robinhood.com/us/en/prediction-markets/climate/" target="_blank">Robinhood</a>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(
-            f"""
-            <div class="wethr-card">
-              <h4>Current Temp</h4>
-              <div class="value">{latest['Temp']:.2f}°F</div>
-              <div class="sub">Updated {get_display_time(latest['dt_utc'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c2:
-        change_str = "—" if temp_change is None else f"{temp_change:+.2f}°F"
-        st.markdown(
-            f"""
-            <div class="wethr-card">
-              <h4>Temp Change</h4>
-              <div class="value">{change_str}</div>
-              <div class="sub">Since last observation</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c3:
-        high_time = get_display_time(high_mark["dt_utc"]) if high_mark else "—"
-        low_time = get_display_time(low_mark["dt_utc"]) if low_mark else "—"
-        st.markdown(
-            f"""
-            <div class="wethr-card">
-              <h4>WETHR Extremes</h4>
-              <div class="value">{high_round}° / {low_round}°</div>
-              <div class="sub">High {high_time} · Low {low_time}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("<div class='section-title'>Live Temperature</div>", unsafe_allow_html=True)
-    range_choice = st.radio("Time Range", ["All Day", "Last 12H", "Last 6H", "Last 2H"], horizontal=True)
-    if range_choice == "All Day":
-        chart_recs = today_recs
-    else:
-        hours = int(range_choice.split()[1].replace("H", ""))
-        cutoff = now_miami - timedelta(hours=hours)
-        chart_recs = [x for x in history if x["dt_utc"].astimezone(TZ_MIAMI) >= cutoff]
-
-    if chart_recs:
-        df_chart = pd.DataFrame(
-            {
-                "Time": [x["dt_utc"].astimezone(TZ_MIAMI) for x in chart_recs],
-                "Temp": [x["Temp"] for x in chart_recs],
-            }
-        ).sort_values("Time")
-        st.line_chart(df_chart.set_index("Time"))
-    else:
-        st.info("No data available for the selected time range.")
-
-    st.markdown("<div class='section-title'>Market Snapshot</div>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Temp", "%.2f°F" % latest["Temp"], "Feels %.0f°" % calculate_heat_index(latest["Temp"], latest["Hum"]))
     c2.metric("Proj. High", "%d°F" % forecast_high, "NWS daytime", delta_color="off")
     c3.metric("Day High", "%.2f°F" % high_mark["Temp"], "Rounded %d°F" % high_round, delta_color="off")
     c4.metric("Solar (HRRR)", "—" if hrrr_rad is None else "%d W/m²" % int(round(hrrr_rad)))
-
-    st.markdown("<div class='section-title'>Recent Observations</div>", unsafe_allow_html=True)
-    obs_rows = []
-    for row in history[:12]:
-        obs_rows.append(
-            {
-                "Time": row["dt_utc"].astimezone(TZ_MIAMI).strftime("%I:%M %p"),
-                "Temp (°F)": f"{row['Temp']:.2f}",
-                "Wind": row.get("Wind", "—"),
-                "Sky": row.get("Sky", "—"),
-                "Source": row.get("Source", "—"),
-            }
-        )
-    if obs_rows:
-        st.dataframe(pd.DataFrame(obs_rows), use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
