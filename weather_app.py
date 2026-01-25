@@ -426,6 +426,7 @@ def fetch_forecast_data() -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "today_daily": None,
         "tomorrow_daily": None,
+        "daytimes": [],
         "all_hourly": [],
         "hrrr_now": None,
         "hrrr_today_peak": None,
@@ -444,6 +445,7 @@ def fetch_forecast_data() -> Dict[str, Any]:
         if r_d.status_code == 200:
             periods = r_d.json().get("properties", {}).get("periods", [])
             daytimes = [p for p in periods if p.get("isDaytime")]
+            data["daytimes"] = daytimes
             if len(daytimes) >= 1:
                 data["today_daily"] = daytimes[0]
             if len(daytimes) >= 2:
@@ -967,6 +969,16 @@ def forecast_trade_confidence(
     return sentiment, score, " + ".join(reasons[:5]) if reasons else "—"
 
 
+def pick_daytime_for_date(daytimes: List[Dict[str, Any]], target_date: datetime.date) -> Optional[Dict[str, Any]]:
+    for p in daytimes:
+        start = parse_iso_time(p.get("startTime")) if p else None
+        if not start:
+            continue
+        if start.astimezone(TZ_MIAMI).date() == target_date:
+            return p
+    return None
+
+
 def forecast_ai_summary(
     daily_text: str,
     peak_rad: Optional[float],
@@ -1108,8 +1120,10 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         ref_msg = "⚠️ ITM already, but conditions still support further heating."
 
     forecast_high = high_round
-    if f_data.get("today_daily"):
-        nws_high = f_data["today_daily"].get("temperature")
+    daytimes = f_data.get("daytimes") or []
+    daily_for_today = pick_daytime_for_date(daytimes, now_miami.date())
+    if daily_for_today:
+        nws_high = daily_for_today.get("temperature")
         if isinstance(nws_high, (int, float)):
             forecast_high = max(forecast_high, int(nws_high))
 
@@ -1370,9 +1384,12 @@ def main() -> None:
         f_data = fetch_forecast_data()
         now = get_miami_time()
 
+        daytimes = f_data.get("daytimes") or []
+
         if view_mode == "Today's Forecast":
+            daily_for_today = pick_daytime_for_date(daytimes, now.date())
             render_forecast_generic(
-                daily=f_data.get("today_daily"),
+                daily=daily_for_today or f_data.get("today_daily"),
                 hourly=f_data.get("all_hourly", []),
                 date_label=format_ordinal_day(now),
                 f_data=f_data,
@@ -1380,6 +1397,7 @@ def main() -> None:
             )
         else:
             tomorrow = (now + timedelta(days=1)).date()
+            daily_for_tomorrow = pick_daytime_for_date(daytimes, tomorrow)
             hourly = []
             for h in (f_data.get("all_hourly") or []):
                 dt = parse_iso_time(h.get("startTime"))
@@ -1391,7 +1409,7 @@ def main() -> None:
                     hourly.append(h)
 
             render_forecast_generic(
-                daily=f_data.get("tomorrow_daily"),
+                daily=daily_for_tomorrow or f_data.get("tomorrow_daily"),
                 hourly=hourly if hourly else (f_data.get("all_hourly") or []),
                 date_label=format_ordinal_day(now + timedelta(days=1)),
                 f_data=f_data,
