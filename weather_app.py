@@ -653,15 +653,16 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
         if r.status_code == 200:
             for line in r.text.splitlines():
                 line = line.strip()
-                if not line or not line.startswith("KMIA"):
+                if not line or " KMIA " not in f" {line} ":
                     continue
 
                 tm_m = re.search(r"\b(\d{2})(\d{4})Z\b", line)
                 tp_m = re.search(r"\b(M?\d{2})/(M?\d{2})\b", line)
+                tg_m = re.search(r"\bT([01])(\d{3})([01])(\d{3})\b", line)
                 pr_m = re.search(r"\bA(\d{4})\b", line)
                 wind_m = re.search(r"\b(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?KT\b", line)
 
-                if not (tm_m and tp_m):
+                if not (tm_m and (tp_m or tg_m)):
                     continue
 
                 day = int(tm_m.group(1))
@@ -670,8 +671,16 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
                 dt = datetime(now_utc.year, now_utc.month, day, int(hhmm[:2]), int(hhmm[2:]), tzinfo=timezone.utc)
                 dt = _metar_month_rollover(dt, now_utc)
 
-                tc = int(tp_m.group(1).replace("M", "-"))
-                dc = int(tp_m.group(2).replace("M", "-"))
+                tc: Optional[float] = None
+                dc: Optional[float] = None
+                if tg_m:
+                    t_sign = -1 if tg_m.group(1) == "1" else 1
+                    d_sign = -1 if tg_m.group(3) == "1" else 1
+                    tc = t_sign * (int(tg_m.group(2)) / 10.0)
+                    dc = d_sign * (int(tg_m.group(4)) / 10.0)
+                elif tp_m:
+                    tc = float(int(tp_m.group(1).replace("M", "-")))
+                    dc = float(int(tp_m.group(2).replace("M", "-")))
 
                 press_in = int(pr_m.group(1)) / 100.0 if pr_m else 0.0
 
@@ -702,16 +711,20 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
                 elif re.search(r"\bFG\b|\bBR\b|\bHZ\b", line):
                     wx = "FG"
 
-                try:
-                    hum = 100.0 * (
-                        math.exp((17.625 * dc) / (243.04 + dc))
-                        / math.exp((17.625 * tc) / (243.04 + tc))
-                    )
-                except Exception:
-                    hum = 0.0
+                hum = 0.0
+                temp_f = 0.0
+                dew_f = 0.0
+                if tc is not None and dc is not None:
+                    try:
+                        hum = 100.0 * (
+                            math.exp((17.625 * dc) / (243.04 + dc))
+                            / math.exp((17.625 * tc) / (243.04 + tc))
+                        )
+                    except Exception:
+                        hum = 0.0
 
-                temp_f = c_to_f(float(tc))
-                dew_f = c_to_f(float(dc))
+                    temp_f = c_to_f(tc)
+                    dew_f = c_to_f(dc)
 
                 data_list.append(
                     {
@@ -725,6 +738,7 @@ def fetch_live_history() -> Tuple[List[Dict[str, Any]], List[str]]:
                         "Hum": float(hum),
                         "Dew": dew_f,
                         "Press": press_in,
+                        "Raw": line,
                     }
                 )
         else:
