@@ -967,6 +967,56 @@ def forecast_trade_confidence(
     return sentiment, score, " + ".join(reasons[:5]) if reasons else "—"
 
 
+def forecast_ai_summary(
+    daily_text: str,
+    peak_rad: Optional[float],
+    peak_precip: Optional[float],
+    is_daylight_period: Optional[bool],
+) -> Tuple[str, str]:
+    text = (daily_text or "").lower()
+    tags: List[str] = []
+    summary = []
+
+    if any(k in text for k in ["thunder", "t-storm", "storm"]):
+        tags.append("⚠️ Storm risk")
+        summary.append("Instability signals; convection could cap heating.")
+    if any(k in text for k in ["rain", "showers"]):
+        tags.append("🌧️ Wet bias")
+        summary.append("Precipitation risk may suppress highs.")
+    if any(k in text for k in ["sunny", "clear", "mostly sunny"]):
+        tags.append("☀️ Clear-sky bias")
+        summary.append("Clearer skies support stronger daytime warming.")
+    if any(k in text for k in ["cloudy", "overcast"]):
+        tags.append("☁️ Cloud risk")
+        summary.append("Cloud cover could limit solar gain.")
+
+    if is_daylight_period is False:
+        tags.append("🌙 Night period")
+        summary.append("Nighttime cooling dominates this period.")
+
+    if peak_rad is not None:
+        if peak_rad >= 650:
+            tags.append("🔆 Strong solar")
+            summary.append("HRRR solar peak is strong; heating potential is higher.")
+        elif peak_rad <= 250:
+            tags.append("🔅 Weak solar")
+            summary.append("HRRR solar peak is weak; heating potential is limited.")
+
+    if peak_precip is not None:
+        if peak_precip >= 70:
+            tags.append("🌧️ High precip")
+            summary.append("High precip probability adds downside risk.")
+        elif peak_precip >= 50:
+            tags.append("🌦️ Elevated precip")
+            summary.append("Elevated precip risk adds uncertainty.")
+
+    if not tags:
+        tags.append("✅ Stable")
+        summary.append("Signals are mixed but no strong negatives detected.")
+
+    return " • ".join(tags[:3]), " ".join(summary[:2])
+
+
 # =============================================================================
 # AUTO-REFRESH (no time.sleep)
 # =============================================================================
@@ -1209,6 +1259,7 @@ def render_forecast_generic(
     is_daylight_period = sunrise_p <= period_time.astimezone(TZ_MIAMI) <= sunset_p
 
     sent, conf, reasons = forecast_trade_confidence(daily_text, peak_rad, peak_precip, is_daylight_period)
+    ai_tags, ai_summary = forecast_ai_summary(daily_text, peak_rad, peak_precip, is_daylight_period)
 
     gauge_col1, gauge_col2 = st.columns([1, 3])
     with gauge_col1:
@@ -1216,6 +1267,8 @@ def render_forecast_generic(
     with gauge_col2:
         st.progress(conf / 100.0)
         st.caption(f"Confidence: **{conf}%** — {reasons}")
+
+    st.info(f"🤖 **AI Forecast:** {ai_tags} — {ai_summary}")
 
     # Daily text
     if daily:
