@@ -39,7 +39,7 @@ OM_API_URL = (
     "https://api.open-meteo.com/v1/forecast"
     "?latitude=25.7954&longitude=-80.2901"
     "&hourly=temperature_2m,precipitation_probability,shortwave_radiation,cloud_cover"
-    "&timezone=America%2FNew_York&forecast_days=2&models=hrrr_north_america"
+    "&timezone=America%2FNew_York&forecast_days=2"
 )
 
 # --- GLOBAL STYLES ---
@@ -468,57 +468,64 @@ def fetch_forecast_data() -> Dict[str, Any]:
         r = safe_get(OM_API_URL, timeout=5)
         if r.status_code == 200:
             hrrr = r.json()
-            h = hrrr.get("hourly", {})
-            times = h.get("time", []) or []
-            if times:
-                now_local = get_miami_time()
-                best_i = _nearest_index_for_local_hour(times, now_local)
+            if hrrr.get("error"):
+                data["status"].append("Open-Meteo unavailable")
+            else:
+                h = hrrr.get("hourly", {})
+                times = h.get("time", []) or []
+                if times:
+                    now_local = get_miami_time()
+                    best_i = _nearest_index_for_local_hour(times, now_local)
 
-                def at(arr, idx):
-                    if not isinstance(arr, list) or idx is None or idx < 0 or idx >= len(arr):
-                        return None
-                    return arr[idx]
+                    def at(arr, idx):
+                        if not isinstance(arr, list) or idx is None or idx < 0 or idx >= len(arr):
+                            return None
+                        return arr[idx]
 
-                rad_arr = h.get("shortwave_radiation", []) or []
-                precip_arr = h.get("precipitation_probability", []) or []
-                temp_arr = h.get("temperature_2m", []) or []
-                cloud_arr = h.get("cloud_cover", []) or []
+                    rad_arr = h.get("shortwave_radiation", []) or []
+                    precip_arr = h.get("precipitation_probability", []) or []
+                    temp_arr = h.get("temperature_2m", []) or []
+                    cloud_arr = h.get("cloud_cover", []) or []
 
-                rad = at(rad_arr, best_i)
-                precip = at(precip_arr, best_i)
-                temp_c = at(temp_arr, best_i)
-                cloud = at(cloud_arr, best_i)
+                    rad = at(rad_arr, best_i)
+                    precip = at(precip_arr, best_i)
+                    temp_c = at(temp_arr, best_i)
+                    cloud = at(cloud_arr, best_i)
 
-                # If rad looks too low during daytime, take max in ±2h window
-                try:
-                    if best_i is not None and 9 <= now_local.hour <= 16:
-                        candidates = []
-                        for j in range(best_i - 2, best_i + 3):
-                            v = at(rad_arr, j)
-                            if v is not None:
-                                candidates.append(float(v))
-                        if candidates:
-                            rad = max(candidates)
-                except Exception:
-                    pass
+                    # If rad looks too low during daytime, take max in ±2h window
+                    try:
+                        if best_i is not None and 9 <= now_local.hour <= 16:
+                            candidates = []
+                            for j in range(best_i - 2, best_i + 3):
+                                v = at(rad_arr, j)
+                                if v is not None:
+                                    candidates.append(float(v))
+                            if candidates:
+                                rad = max(candidates)
+                    except Exception:
+                        pass
 
-                data["hrrr_now"] = {
-                    "rad": rad,
-                    "precip": precip,
-                    "temp_c": temp_c,
-                    "cloud": cloud,
-                    "time": times[best_i] if best_i is not None else None,
-                    "index": best_i,
-                }
+                    data["hrrr_now"] = {
+                        "rad": rad,
+                        "precip": precip,
+                        "temp_c": temp_c,
+                        "cloud": cloud,
+                        "time": times[best_i] if best_i is not None else None,
+                        "index": best_i,
+                    }
 
-                # Peak solar/precip for today & tomorrow (09-16)
-                today = now_local.date()
-                tomorrow = (now_local + timedelta(days=1)).date()
-                peak_rad_today, peak_pp_today = _hrrr_peak_for_date(h, times, today)
-                peak_rad_tmr, peak_pp_tmr = _hrrr_peak_for_date(h, times, tomorrow)
+                    # Peak solar/precip for today & tomorrow (09-16)
+                    today = now_local.date()
+                    tomorrow = (now_local + timedelta(days=1)).date()
+                    peak_rad_today, peak_pp_today = _hrrr_peak_for_date(h, times, today)
+                    peak_rad_tmr, peak_pp_tmr = _hrrr_peak_for_date(h, times, tomorrow)
 
-                data["hrrr_today_peak"] = {"rad": peak_rad_today, "precip": peak_pp_today}
-                data["hrrr_tomorrow_peak"] = {"rad": peak_rad_tmr, "precip": peak_pp_tmr}
+                    data["hrrr_today_peak"] = {"rad": peak_rad_today, "precip": peak_pp_today}
+                    data["hrrr_tomorrow_peak"] = {"rad": peak_rad_tmr, "precip": peak_pp_tmr}
+                else:
+                    data["status"].append("Open-Meteo hourly data unavailable")
+        else:
+            data["status"].append("Open-Meteo unavailable")
     except Exception:
         logger.exception("HRRR(Open-Meteo) fetch error")
         data["status"].append("HRRR(Open-Meteo) unavailable")
