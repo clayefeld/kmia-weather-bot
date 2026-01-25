@@ -1029,7 +1029,11 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
     now_miami = get_miami_time()
 
     today_recs = [x for x in history if x["dt_utc"].astimezone(TZ_MIAMI).date() == now_miami.date()]
-    high_mark = max(today_recs, key=lambda x: x["Temp"]) if today_recs else latest
+    awc_today_recs = [x for x in today_recs if x.get("Source") == "AWC"]
+    if awc_today_recs:
+        high_mark = max(awc_today_recs, key=lambda x: x["Temp"])
+    else:
+        high_mark = max(today_recs, key=lambda x: x["Temp"]) if today_recs else latest
     high_round = int(round(high_mark["Temp"]))
 
     hrrr_rad = None
