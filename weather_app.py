@@ -36,10 +36,10 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 OM_API_URL = (
-    "https://api.open-meteo.com/v1/forecast"
+    "https://api.open-meteo.com/v1/gfs"
     "?latitude=25.7954&longitude=-80.2901"
     "&hourly=temperature_2m,precipitation_probability,shortwave_radiation,cloud_cover"
-    "&timezone=America%2FNew_York&forecast_days=2&models=hrrr_north_america"
+    "&timezone=America%2FNew_York&forecast_days=2"
 )
 
 # --- GLOBAL STYLES ---
@@ -461,7 +461,7 @@ def fetch_forecast_data() -> Dict[str, Any]:
         logger.exception("NWS forecast error")
         data["status"].append("NWS forecast error")
 
-    # HRRR via Open-Meteo
+    # HRRR via Open-Meteo (GFS/HRRR endpoint)
     try:
         r = safe_get(OM_API_URL, timeout=5)
         if r.status_code == 200:
@@ -517,6 +517,8 @@ def fetch_forecast_data() -> Dict[str, Any]:
 
                 data["hrrr_today_peak"] = {"rad": peak_rad_today, "precip": peak_pp_today}
                 data["hrrr_tomorrow_peak"] = {"rad": peak_rad_tmr, "precip": peak_pp_tmr}
+        else:
+            data["status"].append("HRRR(Open-Meteo) unavailable")
 
     except Exception:
         logger.exception("HRRR(Open-Meteo) fetch error")
