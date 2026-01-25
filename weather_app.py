@@ -980,6 +980,7 @@ def pick_daytime_for_date(daytimes: List[Dict[str, Any]], target_date: datetime.
 
 
 def forecast_ai_summary(
+    daily: Optional[Dict[str, Any]],
     daily_text: str,
     peak_rad: Optional[float],
     peak_precip: Optional[float],
@@ -988,6 +989,14 @@ def forecast_ai_summary(
     text = (daily_text or "").lower()
     tags: List[str] = []
     summary = []
+
+    if daily:
+        name = daily.get("name", "")
+        temp = daily.get("temperature")
+        if name:
+            summary.append(f"Period: {name}.")
+        if isinstance(temp, (int, float)):
+            summary.append(f"NWS temp: {int(temp)}°.")
 
     if any(k in text for k in ["thunder", "t-storm", "storm"]):
         tags.append("⚠️ Storm risk")
@@ -1026,7 +1035,7 @@ def forecast_ai_summary(
         tags.append("✅ Stable")
         summary.append("Signals are mixed but no strong negatives detected.")
 
-    return " • ".join(tags[:3]), " ".join(summary[:2])
+    return " • ".join(tags[:3]), " ".join(summary[:3])
 
 
 # =============================================================================
@@ -1273,7 +1282,7 @@ def render_forecast_generic(
     is_daylight_period = sunrise_p <= period_time.astimezone(TZ_MIAMI) <= sunset_p
 
     sent, conf, reasons = forecast_trade_confidence(daily_text, peak_rad, peak_precip, is_daylight_period)
-    ai_tags, ai_summary = forecast_ai_summary(daily_text, peak_rad, peak_precip, is_daylight_period)
+    ai_tags, ai_summary = forecast_ai_summary(daily, daily_text, peak_rad, peak_precip, is_daylight_period)
 
     gauge_col1, gauge_col2 = st.columns([1, 3])
     with gauge_col1:
