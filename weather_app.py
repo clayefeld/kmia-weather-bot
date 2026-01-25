@@ -1304,13 +1304,17 @@ def render_forecast_generic(
     if hourly:
         # Get sunrise/sunset for each hour's local date
         h_data = []
-        for h in hourly[:24]:
+        target_date = get_miami_time().date() if which_day == "today" else (get_miami_time() + timedelta(days=1)).date()
+        for h in hourly:
             dt = parse_iso_time(h.get("startTime"))
             if not dt:
                 continue
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             dt_local = dt.astimezone(TZ_MIAMI)
+            if dt_local.date() != target_date:
+                continue
+
             sunrise, sunset = get_sun_times(dt_local.date())
             is_night = dt_local < sunrise or dt_local > sunset
 
@@ -1335,7 +1339,10 @@ def render_forecast_generic(
                     "Wind": "%s %s" % (h.get("windDirection", ""), h.get("windSpeed", "")),
                 }
             )
-        st.table(pd.DataFrame(h_data))
+        if h_data:
+            st.table(pd.DataFrame(h_data))
+        else:
+            st.info("No hourly data for the selected day.")
     else:
         st.warning("⚠️ Hourly forecast data temporarily unavailable from NWS.")
 
