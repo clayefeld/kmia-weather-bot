@@ -58,6 +58,53 @@ div.stButton > button {width: 100%;}
 </style>
 """
 
+WETHR_CSS = """
+<style>
+.wethr-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+.wethr-subtle {
+    color: rgba(255,255,255,0.7);
+    font-size: 0.9rem;
+}
+.wethr-links a {
+    margin-right: 0.6rem;
+    font-weight: 600;
+    text-decoration: none;
+}
+.wethr-card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    padding: 1rem 1.1rem;
+    min-height: 110px;
+}
+.wethr-card h4 {
+    margin: 0 0 0.35rem 0;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255,255,255,0.6);
+}
+.wethr-card .value {
+    font-size: 1.9rem;
+    font-weight: 700;
+}
+.wethr-card .sub {
+    color: rgba(255,255,255,0.75);
+    font-size: 0.85rem;
+}
+.section-title {
+    margin-top: 1.2rem;
+    font-weight: 700;
+    font-size: 1.1rem;
+}
+</style>
+"""
+
 # --- LOGGING ---
 logger = logging.getLogger("helios")
 if not logger.handlers:
@@ -1036,6 +1083,12 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         high_mark = max(today_recs, key=lambda x: x["Temp"]) if today_recs else latest
     high_round = int(round(high_mark["Temp"]))
 
+    low_mark = min(today_recs, key=lambda x: x["Temp"]) if today_recs else latest
+    low_round = int(round(low_mark["Temp"]))
+
+    prev = history[1] if len(history) > 1 else None
+    temp_change = None if prev is None else (latest["Temp"] - prev["Temp"])
+
     hrrr_rad = None
     hrrr_precip = None
     if f_data.get("hrrr_now"):
@@ -1084,13 +1137,102 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
         if isinstance(nws_high, (int, float)):
             forecast_high = max(forecast_high, int(nws_high))
 
-    st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
+    st.markdown(HIDE_INDEX_CSS + WETHR_CSS, unsafe_allow_html=True)
 
+    st.markdown(
+        f"""
+        <div class="wethr-header">
+          <div><strong>Miami (KMIA)</strong></div>
+          <div class="wethr-subtle">DATE: {now_miami.strftime('%m/%d/%Y')}</div>
+        </div>
+        <div class="wethr-links">
+          <a href="https://kalshi.com/markets/KXHIGHMIA" target="_blank">Trade on Kalshi</a>
+          <a href="https://polymarket.com/search?q=Miami%20temperature" target="_blank">Polymarket</a>
+          <a href="https://robinhood.com/us/en/prediction-markets/climate/" target="_blank">Robinhood</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(
+            f"""
+            <div class="wethr-card">
+              <h4>Current Temp</h4>
+              <div class="value">{latest['Temp']:.2f}°F</div>
+              <div class="sub">Updated {get_display_time(latest['dt_utc'])}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c2:
+        change_str = "—" if temp_change is None else f"{temp_change:+.2f}°F"
+        st.markdown(
+            f"""
+            <div class="wethr-card">
+              <h4>Temp Change</h4>
+              <div class="value">{change_str}</div>
+              <div class="sub">Since last observation</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c3:
+        high_time = get_display_time(high_mark["dt_utc"]) if high_mark else "—"
+        low_time = get_display_time(low_mark["dt_utc"]) if low_mark else "—"
+        st.markdown(
+            f"""
+            <div class="wethr-card">
+              <h4>WETHR Extremes</h4>
+              <div class="value">{high_round}° / {low_round}°</div>
+              <div class="sub">High {high_time} · Low {low_time}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div class='section-title'>Live Temperature</div>", unsafe_allow_html=True)
+    range_choice = st.radio("Time Range", ["All Day", "Last 12H", "Last 6H", "Last 2H"], horizontal=True)
+    if range_choice == "All Day":
+        chart_recs = today_recs
+    else:
+        hours = int(range_choice.split()[1].replace("H", ""))
+        cutoff = now_miami - timedelta(hours=hours)
+        chart_recs = [x for x in history if x["dt_utc"].astimezone(TZ_MIAMI) >= cutoff]
+
+    if chart_recs:
+        df_chart = pd.DataFrame(
+            {
+                "Time": [x["dt_utc"].astimezone(TZ_MIAMI) for x in chart_recs],
+                "Temp": [x["Temp"] for x in chart_recs],
+            }
+        ).sort_values("Time")
+        st.line_chart(df_chart.set_index("Time"))
+    else:
+        st.info("No data available for the selected time range.")
+
+    st.markdown("<div class='section-title'>Market Snapshot</div>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Temp", "%.2f°F" % latest["Temp"], "Feels %.0f°" % calculate_heat_index(latest["Temp"], latest["Hum"]))
     c2.metric("Proj. High", "%d°F" % forecast_high, "NWS daytime", delta_color="off")
     c3.metric("Day High", "%.2f°F" % high_mark["Temp"], "Rounded %d°F" % high_round, delta_color="off")
     c4.metric("Solar (HRRR)", "—" if hrrr_rad is None else "%d W/m²" % int(round(hrrr_rad)))
+
+    st.markdown("<div class='section-title'>Recent Observations</div>", unsafe_allow_html=True)
+    obs_rows = []
+    for row in history[:12]:
+        obs_rows.append(
+            {
+                "Time": row["dt_utc"].astimezone(TZ_MIAMI).strftime("%I:%M %p"),
+                "Temp (°F)": f"{row['Temp']:.2f}",
+                "Wind": row.get("Wind", "—"),
+                "Sky": row.get("Sky", "—"),
+                "Source": row.get("Source", "—"),
+            }
+        )
+    if obs_rows:
+        st.dataframe(pd.DataFrame(obs_rows), use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
