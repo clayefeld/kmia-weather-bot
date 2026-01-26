@@ -216,7 +216,13 @@ def fetch_cli_max() -> Optional[Dict[str, Any]]:
             return None
         txt = r.text
 
-        m_date = re.search(r"^\s*DATE\s+(\d{1,2}/\d{1,2}/\d{2,4})\b", txt, re.MULTILINE)
+        m_date = re.search(
+            r"^\s*DATE\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{2,4})\b",
+            txt,
+            re.MULTILINE,
+        )
+        if not m_date:
+            m_date = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", txt)
         m = re.search(r"^\s*MAXIMUM\s+(\d+)\s+(\d{1,2}:\d{2}\s+[AP]M)\b", txt, re.MULTILINE)
         if not m:
             return None
