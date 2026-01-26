@@ -240,6 +240,11 @@ def fetch_cli_max() -> Optional[Dict[str, Any]]:
                 re.IGNORECASE,
             )
             date_str = m.group(0) if m else None
+
+        if date_str:
+            m = re.match(r"^(MON|TUE|WED|THU|FRI|SAT|SUN)\b\s*(.*)$", date_str.strip(), re.IGNORECASE)
+            if m:
+                date_str = m.group(2).strip()
         m = re.search(r"^\s*MAXIMUM\s+(\d+)\s+(\d{1,2}:\d{2}\s+[AP]M)\b", txt, re.MULTILINE)
         if not m:
             return None
