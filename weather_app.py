@@ -35,6 +35,8 @@ AWC_TAF_URL = "https://aviationweather.gov/api/data/taf?ids=KMIA&format=raw"
 
 KALSHI_API_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
+CLI_URL = "https://forecast.weather.gov/product.php?format=txt&glossary=0&site=MFL&product=CLI&issuedby=MIA"
+
 OM_API_URL = (
     "https://api.open-meteo.com/v1/forecast"
     "?latitude=25.7954&longitude=-80.2901"
@@ -201,6 +203,29 @@ def icon_from_short_forecast(text: str) -> str:
     if "cloud" in t or "overcast" in t:
         return "☁️"
     return "☁️"
+
+
+# =============================================================================
+# CLI (CLIMATE REPORT) FETCHER
+# =============================================================================
+@st.cache_data(ttl=300)
+def fetch_cli_max() -> Optional[Dict[str, Any]]:
+    try:
+        r = safe_get(CLI_URL, timeout=8)
+        if r.status_code != 200:
+            return None
+        txt = r.text
+
+        m = re.search(r"^\s*MAXIMUM\s+(\d+)\s+(\d{1,2}:\d{2}\s+[AP]M)\b", txt, re.MULTILINE)
+        if not m:
+            return None
+
+        max_f = int(m.group(1))
+        time_lst = m.group(2)
+        return {"max_f": max_f, "time_lst": time_lst}
+    except Exception:
+        logger.exception("CLI fetch error")
+        return None
 
 
 # =============================================================================
@@ -1144,11 +1169,22 @@ def render_live_dashboard(target_temp: float, bracket_label: str, live_price: in
 
     st.markdown(HIDE_INDEX_CSS, unsafe_allow_html=True)
 
-    c1, c2, c3, c4 = st.columns(4)
+    cli_max = fetch_cli_max()
+    cli_max_val = "—"
+    cli_time_val = "—"
+    if isinstance(cli_max, dict):
+        try:
+            cli_max_val = f"{int(cli_max.get('max_f'))}°F"
+        except Exception:
+            cli_max_val = "—"
+        cli_time_val = cli_max.get("time_lst", "—")
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Temp", "%.2f°F" % latest["Temp"], "Feels %.0f°" % calculate_heat_index(latest["Temp"], latest["Hum"]))
     c2.metric("Proj. High", "%d°F" % forecast_high, "NWS daytime", delta_color="off")
     c3.metric("Day High", "%.2f°F" % high_mark["Temp"], "Rounded %d°F" % high_round, delta_color="off")
-    c4.metric("Solar (HRRR)", "—" if hrrr_rad is None else "%d W/m²" % int(round(hrrr_rad)))
+    c4.metric("CLI Max", cli_max_val, cli_time_val, delta_color="off")
+    c5.metric("Solar (HRRR)", "—" if hrrr_rad is None else "%d W/m²" % int(round(hrrr_rad)))
 
     st.markdown("---")
 
