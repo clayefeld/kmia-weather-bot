@@ -216,20 +216,27 @@ def fetch_cli_max() -> Optional[Dict[str, Any]]:
             return None
         txt = r.text
 
-        m_date = re.search(
-            r"^\s*DATE\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{2,4})\b",
-            txt,
-            re.MULTILINE,
-        )
-        if not m_date:
-            m_date = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", txt)
+        m_date = re.search(r"^\s*DATE\s*[:\-]?\s*(.+?)\s*$", txt, re.MULTILINE)
+        date_str = None
+        if m_date:
+            date_str = m_date.group(1).strip()
+        if not date_str:
+            m = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", txt)
+            date_str = m.group(1) if m else None
+        if not date_str:
+            m = re.search(
+                r"\b(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|"
+                r"JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)\s+\d{1,2}(?:,)?\s+\d{4}\b",
+                txt,
+                re.IGNORECASE,
+            )
+            date_str = m.group(0) if m else None
         m = re.search(r"^\s*MAXIMUM\s+(\d+)\s+(\d{1,2}:\d{2}\s+[AP]M)\b", txt, re.MULTILINE)
         if not m:
             return None
 
         max_f = int(m.group(1))
         time_lst = m.group(2)
-        date_str = m_date.group(1) if m_date else None
         return {"max_f": max_f, "time_lst": time_lst, "date_str": date_str}
     except Exception:
         logger.exception("CLI fetch error")
