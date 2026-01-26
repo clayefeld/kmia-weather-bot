@@ -50,7 +50,7 @@ tbody th {display:none}
 div.stButton > button {width: 100%;}
 @media (max-width: 640px) {
     [data-testid="column"] {width: 50% !important; flex: 0 0 50% !important; min-width: 0 !important; padding: 0 0.2rem !important;}
-    .block-container {padding-top: 1rem !important; padding-bottom: 2rem !important;}
+    .block-container {padding-top: 2rem !important; padding-bottom: 2rem !important;}
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
     [data-testid="stMetricLabel"] { font-size: 0.8rem !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 }
