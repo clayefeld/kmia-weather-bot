@@ -2,6 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 import base64
+import html
 import time
 import pandas as pd
 import math
@@ -215,11 +216,24 @@ def fetch_cli_max() -> Optional[Dict[str, Any]]:
         if r.status_code != 200:
             return None
         txt = r.text
+        if "<pre" in txt.lower():
+            m_pre = re.search(r"<pre[^>]*>(.*?)</pre>", txt, re.S | re.I)
+            if m_pre:
+                txt = html.unescape(m_pre.group(1))
 
         m_date = re.search(r"^\s*DATE\s*[:\-]?\s*(.+?)\s*$", txt, re.MULTILINE)
         date_str = None
         if m_date:
             date_str = m_date.group(1).strip()
+        if not date_str:
+            m = re.search(
+                r"\bCLIMATE SUMMARY FOR\s+"
+                r"(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|"
+                r"JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)\s+\d{1,2}\s+\d{4}\b",
+                txt,
+                re.IGNORECASE,
+            )
+            date_str = m.group(0).split("FOR", 1)[1].strip() if m else None
         if not date_str:
             m = re.search(
                 r"\b(?:MON|TUE|WED|THU|FRI|SAT|SUN)\s+"
