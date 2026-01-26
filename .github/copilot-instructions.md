@@ -1,7 +1,7 @@
 # Copilot instructions
 
 ## Project overview
-- Single-file Streamlit app in [weather_app.py](weather_app.py) that renders “Project Helios” UI and all data pipelines.
+- Single-file Streamlit app in [weather_app.py](../weather_app.py) that renders "Project Helios" UI and all data pipelines.
 - Data sources are external HTTP APIs: NWS points/forecast + station observations, AWC METAR/TAF, Open-Meteo HRRR proxy, and Kalshi markets.
 - Local timezone is hardcoded to Miami: `TZ_MIAMI = ZoneInfo("America/New_York")` and reused across time/forecast logic.
 
@@ -22,10 +22,10 @@
 - Icons are derived via `condition_icon_from_sky_wx()` and `icon_from_short_forecast()`; reuse these instead of inline emoji logic.
 
 ## External dependencies & secrets
-- Dependencies are listed in [requirements.txt](requirements.txt); `cryptography` is required for Kalshi auth.
+- Dependencies are listed in [requirements.txt](../requirements.txt); `cryptography` is required for Kalshi auth.
 - Secrets must be provided via `st.secrets` keys `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY` (PEM string with \n escapes).
 
 ## Example touchpoints
-- NWS + HRRR merge: `fetch_forecast_data()` in [weather_app.py](weather_app.py).
-- Observation dedupe logic: `merge_and_dedupe()` in [weather_app.py](weather_app.py).
-- Kalshi label/strike rules: `kalshi_label_and_strike()` in [weather_app.py](weather_app.py).
+- NWS + HRRR merge: `fetch_forecast_data()` in [weather_app.py](../weather_app.py).
+- Observation dedupe logic: `merge_and_dedupe()` in [weather_app.py](../weather_app.py).
+- Kalshi label/strike rules: `kalshi_label_and_strike()` in [weather_app.py](../weather_app.py).
