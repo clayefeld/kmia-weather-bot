@@ -53,7 +53,6 @@ div.stButton > button {width: 100%;}
     .block-container {padding-top: 1rem !important; padding-bottom: 2rem !important;}
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
     [data-testid="stMetricLabel"] { font-size: 0.8rem !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    header {visibility: hidden;}
 }
 </style>
 """
