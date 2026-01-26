@@ -221,6 +221,15 @@ def fetch_cli_max() -> Optional[Dict[str, Any]]:
         if m_date:
             date_str = m_date.group(1).strip()
         if not date_str:
+            m = re.search(
+                r"\b(?:MON|TUE|WED|THU|FRI|SAT|SUN)\s+"
+                r"(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER|"
+                r"JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)\s+\d{1,2}\s+\d{4}\b",
+                txt,
+                re.IGNORECASE,
+            )
+            date_str = m.group(0) if m else None
+        if not date_str:
             m = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", txt)
             date_str = m.group(1) if m else None
         if not date_str:
